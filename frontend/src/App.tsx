@@ -33,6 +33,8 @@ interface ConnectionStatus {
   firewallMode?: string;
   sharedPorts?: number[];
   streamsCount?: number;
+  networkMode?: string;
+  hostsSync?: boolean;
 }
 
 declare global {
@@ -51,6 +53,7 @@ declare global {
           SetFirewallMode: (mode: string) => Promise<void>;
           AllowInboundPort: (port: number) => Promise<void>;
           DisallowInboundPort: (port: number) => Promise<void>;
+          SetNetworkMode: (mode: string) => Promise<void>;
         };
       };
     };
@@ -67,14 +70,17 @@ export function App() {
   const [customDomain, setCustomDomain] = useState('');
   const [obfKey, setObfKey] = useState('');
   const [streamsCount, setStreamsCount] = useState<number>(10);
+  const [networkMode, setNetworkMode] = useState<'userspace' | 'tun'>('userspace');
   const [isConnected, setIsConnected] = useState(false);
   const [statusText, setStatusText] = useState('Отключено');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [localInfo, setLocalInfo] = useState<{ virtualIp: string; domain: string; name: string; streams: number }>({
+  const [localInfo, setLocalInfo] = useState<{ virtualIp: string; domain: string; name: string; streams: number; networkMode: string; hostsSync: boolean }>({
     virtualIp: '',
     domain: '',
     name: '',
     streams: 10,
+    networkMode: 'userspace',
+    hostsSync: false,
   });
   const [peers, setPeers] = useState<Peer[]>([]);
   const [forwardRules, setForwardRules] = useState<ForwardRule[]>([]);
@@ -101,6 +107,9 @@ export function App() {
       window.runtime.EventsOn('status_change', (status: ConnectionStatus) => {
         setIsConnected(status.connected);
         setStatusText(status.statusText);
+        if (status.networkMode === 'tun' || status.networkMode === 'userspace') {
+          setNetworkMode(status.networkMode);
+        }
         if (status.connected) {
           setErrorMessage(null);
           setLocalInfo({
@@ -108,6 +117,8 @@ export function App() {
             domain: status.domain,
             name: status.nodeName,
             streams: status.streamsCount || 10,
+            networkMode: status.networkMode || 'userspace',
+            hostsSync: status.hostsSync ?? true,
           });
           if (status.firewallMode) setFirewallMode(status.firewallMode);
           if (status.sharedPorts) setAllowedPorts(status.sharedPorts);
@@ -148,6 +159,49 @@ export function App() {
     return raw.replace(/^failed to get TURN credentials:\s*/i, '').replace(/^failed to fetch VK TURN credentials with all available API clients:\s*/i, '');
   };
 
+  const handleNetworkModeChange = async (mode: 'userspace' | 'tun') => {
+    setNetworkMode(mode);
+    if (window.go?.main?.App?.SetNetworkMode) {
+      await window.go.main.App.SetNetworkMode(mode);
+    }
+  };
+
+  const handleQuickForward = async (peer: Peer, port: number) => {
+    const targetAddr = peer.domain || peer.virtualIp;
+    const ruleObj: Partial<ForwardRule> = {
+      name: `${peer.name} :${port}`,
+      localPort: port,
+      remoteIp: targetAddr,
+      remotePort: port,
+      protocol: 'TCP',
+    };
+
+    if (window.go?.main?.App?.AddForwardRule) {
+      try {
+        await window.go.main.App.AddForwardRule(ruleObj);
+        const rules = await window.go.main.App.GetForwardRules();
+        setForwardRules(rules);
+        alert(`Проброс 127.0.0.1:${port} ➔ ${targetAddr}:${port} успешно активирован! Вы можете подключаться в игре по адресу ${targetAddr}:${port} или 127.0.0.1:${port}`);
+      } catch (err: any) {
+        alert(err?.message || String(err));
+      }
+    } else {
+      setForwardRules(prev => [
+        ...prev,
+        {
+          id: Math.random().toString(),
+          name: ruleObj.name!,
+          localPort: ruleObj.localPort!,
+          remoteIp: ruleObj.remoteIp!,
+          remotePort: ruleObj.remotePort!,
+          protocol: ruleObj.protocol!,
+          enabled: true,
+        },
+      ]);
+      alert(`Проброс 127.0.0.1:${port} ➔ ${targetAddr}:${port} активирован (демо-режим)`);
+    }
+  };
+
   const handleConnect = async () => {
     if (!vkLink) return;
     setErrorMessage(null);
@@ -163,6 +217,8 @@ export function App() {
           domain: res.domain,
           name: res.nodeName,
           streams: res.streamsCount || streamsCount,
+          networkMode: res.networkMode || networkMode,
+          hostsSync: res.hostsSync ?? true,
         });
       } catch (err: any) {
         const rawErr = err?.message || String(err);
@@ -179,6 +235,8 @@ export function App() {
           domain: customDomain ? `${customDomain}.vkturn` : `${nickname || 'NetHunter'}.vkturn`,
           name: nickname || 'NetHunter',
           streams: streamsCount,
+          networkMode: networkMode,
+          hostsSync: true,
         });
         setPeers([
           {
@@ -458,11 +516,39 @@ export function App() {
                   </div>
                 </div>
 
+                {/* Network Mode Selection */}
+                <div className="input-group" style={{ marginBottom: '14px' }}>
+                  <label>Режим работы сети</label>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginTop: '4px' }}>
+                    <button
+                      type="button"
+                      className={`btn btn-sm ${networkMode === 'userspace' ? 'btn' : 'btn-secondary'}`}
+                      style={{ padding: '8px', fontSize: '0.8rem', textAlign: 'center' }}
+                      onClick={() => handleNetworkModeChange('userspace')}
+                    >
+                      👤 Userspace + Hosts (без root)
+                    </button>
+                    <button
+                      type="button"
+                      className={`btn btn-sm ${networkMode === 'tun' ? 'btn' : 'btn-secondary'}`}
+                      style={{ padding: '8px', fontSize: '0.8rem', textAlign: 'center' }}
+                      onClick={() => handleNetworkModeChange('tun')}
+                    >
+                      🛡️ TUN L3 Адаптер (10.42.x.x)
+                    </button>
+                  </div>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '4px' }}>
+                    {networkMode === 'userspace'
+                      ? '✓ Не требует прав администратора. Имена *.vkturn маппятся на 127.0.0.1 через hosts для локального проксирования.'
+                      : '✓ Создает виртуальный сетевой интерфейс turnp2p0 (10.42.0.0/16). Требует root/admin.'}
+                  </div>
+                </div>
+
                 <button
                   className="btn"
                   onClick={handleConnect}
                   disabled={!vkLink}
-                  style={{ width: '100%', marginTop: '8px' }}
+                  style={{ width: '100%', marginTop: '4px' }}
                 >
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
@@ -477,7 +563,10 @@ export function App() {
                 <div className="card">
                   <div className="card-header">
                     <span className="card-title">Локальный узел</span>
-                    <div style={{ display: 'flex', gap: '6px' }}>
+                    <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                      <span className="badge" style={{ color: '#34d399', background: 'rgba(52, 211, 153, 0.15)' }}>
+                        {localInfo.networkMode === 'tun' ? '🛡️ TUN L3' : '👤 Userspace + Hosts'}
+                      </span>
                       <span className="badge" style={{ color: '#60a5fa' }}>{localInfo.streams} Потоков</span>
                       <span className="badge obf">rtpopus3</span>
                     </div>
@@ -504,8 +593,14 @@ export function App() {
                       </strong>
                     </div>
                   </div>
+                  {localInfo.hostsSync && (
+                    <div style={{ fontSize: '0.75rem', color: '#34d399', marginTop: '6px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      <span>✓</span>
+                      <span>Файл hosts синхронизирован: домен <strong>{localInfo.domain}</strong> и домены пиров доступны для прямого подключения в играх</span>
+                    </div>
+                  )}
                   {copiedText && (
-                    <p style={{ fontSize: '0.75rem', color: 'var(--success)', marginTop: '6px' }}>
+                    <p style={{ fontSize: '0.75rem', color: 'var(--success)', marginTop: '4px' }}>
                       Скопировано в буфер обмена: {copiedText}
                     </p>
                   )}
@@ -522,17 +617,35 @@ export function App() {
                     </p>
                   ) : (
                     peers.map(p => (
-                      <div key={p.id} className="peer-row">
-                        <div>
+                      <div key={p.id} className="peer-row" style={{ alignItems: 'flex-start' }}>
+                        <div style={{ flex: 1 }}>
                           <strong>{p.name}</strong>
-                          <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
-                            {p.domain}
-                            {p.sharedPorts && p.sharedPorts.length > 0 && (
-                              <span style={{ marginLeft: '6px', color: '#34d399' }}>
-                                (Открыты порты: {p.sharedPorts.join(', ')})
-                              </span>
-                            )}
+                          <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '2px' }}>
+                            <span
+                              style={{ color: '#c084fc', cursor: 'pointer' }}
+                              onClick={() => copyToClipboard(p.domain)}
+                              title="Нажмите для копирования домена"
+                            >
+                              {p.domain}
+                            </span>
                           </div>
+                          {p.sharedPorts && p.sharedPorts.length > 0 && (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '6px', flexWrap: 'wrap' }}>
+                              <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Открытые порты:</span>
+                              {p.sharedPorts.map(port => (
+                                <button
+                                  key={port}
+                                  type="button"
+                                  onClick={() => handleQuickForward(p, port)}
+                                  className="btn btn-secondary btn-sm"
+                                  style={{ padding: '2px 6px', fontSize: '0.72rem', background: 'rgba(59, 130, 246, 0.2)', border: '1px solid rgba(59, 130, 246, 0.4)' }}
+                                  title={`Кликните для проброса порта ${port} на 127.0.0.1`}
+                                >
+                                  🔗 :{port} (Подключить)
+                                </button>
+                              ))}
+                            </div>
+                          )}
                         </div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                           <span

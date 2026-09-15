@@ -26,6 +26,7 @@ const (
 	FrameConnectAck byte = 0x03
 	FrameData       byte = 0x04
 	FrameClose      byte = 0x05
+	FrameRawIP      byte = 0x06
 )
 
 // Firewall Modes
@@ -92,6 +93,7 @@ type MeshNode struct {
 	mu          sync.RWMutex
 	running     atomic.Bool
 	onPeerEvent func(peers []Peer)
+	onRawIP     func(ipPacket []byte)
 }
 
 // SanitizeDomain cleans up user custom domain names.
@@ -190,6 +192,39 @@ func (n *MeshNode) SetPeerCallback(cb func(peers []Peer)) {
 	n.mu.Unlock()
 }
 
+// SetRawIPHandler sets the handler invoked when raw L3 IP packets arrive over the mesh.
+func (n *MeshNode) SetRawIPHandler(cb func(ipPacket []byte)) {
+	n.mu.Lock()
+	n.onRawIP = cb
+	n.mu.Unlock()
+}
+
+// SendRawIP routes an IPv4 packet to the destination virtual IP or domain.
+func (n *MeshNode) SendRawIP(targetVirtualIP string, ipPacket []byte) error {
+	if !n.running.Load() {
+		return ErrNodeClosed
+	}
+
+	n.mu.RLock()
+	peer, exists := n.peers[targetVirtualIP]
+	if !exists {
+		peer, exists = n.peersByDom[strings.ToLower(targetVirtualIP)]
+	}
+	if !exists {
+		n.mu.RUnlock()
+		return fmt.Errorf("%w: %s", ErrPeerNotFound, targetVirtualIP)
+	}
+	peerAddr := n.peerAddrs[peer.ID]
+	n.mu.RUnlock()
+
+	frame := make([]byte, 1+len(ipPacket))
+	frame[0] = FrameRawIP
+	copy(frame[1:], ipPacket)
+
+	_, err := n.packetConn.WriteTo(frame, peerAddr)
+	return err
+}
+
 // Start binds the node to the obfuscated TURN packet connection and begins heartbeat discovery.
 func (n *MeshNode) Start(ctx context.Context, conn net.PacketConn) error {
 	n.mu.Lock()
@@ -282,6 +317,13 @@ func (n *MeshNode) readLoop() {
 			n.handleData(payload)
 		case FrameClose:
 			n.handleClose(payload)
+		case FrameRawIP:
+			n.mu.RLock()
+			cb := n.onRawIP
+			n.mu.RUnlock()
+			if cb != nil {
+				cb(payload)
+			}
 		}
 	}
 }

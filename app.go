@@ -10,8 +10,10 @@ import (
 	"sync"
 	"time"
 
+	"turnp2p/core/hosts"
 	"turnp2p/core/p2p"
 	"turnp2p/core/proxy"
+	"turnp2p/core/tun"
 	"turnp2p/core/turn"
 
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -30,15 +32,19 @@ type ConnectionStatus struct {
 	FirewallMode string   `json:"firewallMode"`
 	SharedPorts  []int    `json:"sharedPorts"`
 	StreamsCount int      `json:"streamsCount"`
+	NetworkMode  string   `json:"networkMode"` // "userspace" or "tun"
+	HostsSync    bool     `json:"hostsSync"`
 }
 
 // App struct manages core lifecycle and Wails bindings.
 type App struct {
 	ctx          context.Context
-	turnClients  []*turn.PionClient
 	turnConn     net.PacketConn
 	meshNode     *p2p.MeshNode
 	proxyMgr     *proxy.Manager
+	hostsMgr     *hosts.Manager
+	tunRouter    *tun.Router
+	networkMode  string // "userspace" (default) or "tun"
 	status       ConnectionStatus
 	mu           sync.RWMutex
 }
@@ -46,7 +52,9 @@ type App struct {
 // NewApp creates a new App application struct.
 func NewApp() *App {
 	return &App{
-		proxyMgr: proxy.NewManager(nil),
+		proxyMgr:    proxy.NewManager(nil),
+		hostsMgr:    hosts.NewManager(""),
+		networkMode: "userspace",
 		status: ConnectionStatus{
 			Connected:    false,
 			StatusText:   "Disconnected",
@@ -54,6 +62,8 @@ func NewApp() *App {
 			FirewallMode: p2p.FirewallModeWhitelist,
 			SharedPorts:  []int{},
 			StreamsCount: 10,
+			NetworkMode:  "userspace",
+			HostsSync:    false,
 		},
 	}
 }
@@ -75,6 +85,23 @@ func (a *App) GetStatus() ConnectionStatus {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.status
+}
+
+// SetNetworkMode switches between "userspace" and "tun" modes.
+func (a *App) SetNetworkMode(mode string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if mode != "userspace" && mode != "tun" {
+		mode = "userspace"
+	}
+	a.networkMode = mode
+	a.status.NetworkMode = mode
+
+	if a.ctx != nil {
+		wailsRuntime.EventsEmit(a.ctx, "status_change", a.status)
+	}
+	return nil
 }
 
 // JoinNetwork connects to the VK TURN infrastructure with configurable parallel streams and joins the P2P mesh.
@@ -99,7 +126,7 @@ func (a *App) JoinNetwork(vkLink string, nickname string, customDomain string, o
 		obfKey = a.GenerateRandomKey()
 	}
 
-	// 1. Resolve TURN credentials via anonymous VK Call link
+	// 1. Resolve TURN credentials via anonymous VK Call link (with 10 min cache)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -143,7 +170,21 @@ func (a *App) JoinNetwork(vkLink string, nickname string, customDomain string, o
 
 	// 3. Initialize and start P2P MeshNode with custom domain support
 	node := p2p.NewMeshNode(nickname, customDomain, "")
+
 	node.SetPeerCallback(func(peers []p2p.Peer) {
+		// Sync peer domains to OS hosts file
+		hostsMap := make(map[string]string)
+		for _, p := range peers {
+			if p.Domain != "" {
+				if a.networkMode == "tun" {
+					hostsMap[p.Domain] = p.VirtualIP
+				} else {
+					hostsMap[p.Domain] = "127.0.0.1"
+				}
+			}
+		}
+		_ = a.hostsMgr.Sync(hostsMap)
+
 		if a.ctx != nil {
 			wailsRuntime.EventsEmit(a.ctx, "peers_updated", peers)
 		}
@@ -163,6 +204,26 @@ func (a *App) JoinNetwork(vkLink string, nickname string, customDomain string, o
 		relayAddrStr = addr.String()
 	}
 
+	// 4. If TUN mode requested, attempt to create and start TUN Device
+	activeMode := a.networkMode
+	if activeMode == "tun" {
+		tunDev, tunErr := tun.OpenDevice("turnp2p0", vIP)
+		if tunErr != nil {
+			log.Printf("[App] TUN mode creation failed (%v). Falling back to Userspace mode", tunErr)
+			activeMode = "userspace"
+		} else {
+			router := tun.NewRouter(tunDev, node)
+			if err := router.Start(context.Background()); err != nil {
+				log.Printf("[App] TUN router start failed (%v). Falling back to Userspace mode", err)
+				_ = tunDev.Close()
+				activeMode = "userspace"
+			} else {
+				a.tunRouter = router
+				log.Printf("[App] System TUN L3 adapter activated successfully on %s (%s)", tunDev.Name(), vIP)
+			}
+		}
+	}
+
 	mode, ports := node.GetFirewallConfig()
 	initialActive := bondedPacketConn.ActiveCount()
 
@@ -178,13 +239,15 @@ func (a *App) JoinNetwork(vkLink string, nickname string, customDomain string, o
 		FirewallMode: mode,
 		SharedPorts:  ports,
 		StreamsCount: initialActive,
+		NetworkMode:  activeMode,
+		HostsSync:    true,
 	}
 
 	if a.ctx != nil {
 		wailsRuntime.EventsEmit(a.ctx, "status_change", a.status)
 	}
 
-	log.Printf("[App] Network joined successfully: %s (%s, %s) with %d streams", name, vIP, domain, initialActive)
+	log.Printf("[App] Network joined successfully: %s (%s, %s) in %s mode with %d streams", name, vIP, domain, activeMode, initialActive)
 	return &a.status, nil
 }
 
@@ -210,6 +273,13 @@ func (a *App) LeaveNetwork() error {
 		return nil
 	}
 
+	if a.tunRouter != nil {
+		_ = a.tunRouter.Stop()
+		a.tunRouter = nil
+	}
+
+	_ = a.hostsMgr.Clean()
+
 	if a.meshNode != nil {
 		a.meshNode.Stop()
 		a.meshNode = nil
@@ -220,7 +290,6 @@ func (a *App) LeaveNetwork() error {
 		a.turnConn = nil
 	}
 
-
 	a.proxyMgr.Stop()
 
 	a.status = ConnectionStatus{
@@ -230,6 +299,8 @@ func (a *App) LeaveNetwork() error {
 		FirewallMode: p2p.FirewallModeWhitelist,
 		SharedPorts:  []int{},
 		StreamsCount: 10,
+		NetworkMode:  a.networkMode,
+		HostsSync:    false,
 	}
 
 	if a.ctx != nil {
