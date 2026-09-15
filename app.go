@@ -117,8 +117,8 @@ func (a *App) JoinNetwork(vkLink string, nickname string, customDomain string, o
 		wailsRuntime.EventsEmit(a.ctx, "status_change", a.status)
 	}
 
-	// 2. Establish Multi-Stream TURN allocation with rtpopus3 obfuscation
-	bondedPacketConn, clients, err := turn.AllocateMultiStreamClient(context.Background(), creds, obfKey, streamsCount)
+	// 2. Establish Multi-Stream TURN allocation with rtpopus3 obfuscation & auto-replenish maintainer
+	bondedPacketConn, err := turn.AllocateMultiStreamClient(context.Background(), creds, obfKey, streamsCount)
 	if err != nil {
 		a.status.StatusText = fmt.Sprintf("TURN Relay Failed: %v", err)
 		if a.ctx != nil {
@@ -127,7 +127,18 @@ func (a *App) JoinNetwork(vkLink string, nickname string, customDomain string, o
 		return nil, fmt.Errorf("failed to allocate TURN relay: %w", err)
 	}
 
-	a.turnClients = clients
+	bondedPacketConn.SetCountChangeCallback(func(active int, target int) {
+		a.mu.Lock()
+		if a.status.Connected {
+			a.status.StreamsCount = active
+			a.status.StatusText = fmt.Sprintf("Connected (%d/%d parallel streams, rtpopus3)", active, target)
+			if a.ctx != nil {
+				wailsRuntime.EventsEmit(a.ctx, "status_change", a.status)
+			}
+		}
+		a.mu.Unlock()
+	})
+
 	a.turnConn = bondedPacketConn
 
 	// 3. Initialize and start P2P MeshNode with custom domain support
@@ -153,10 +164,11 @@ func (a *App) JoinNetwork(vkLink string, nickname string, customDomain string, o
 	}
 
 	mode, ports := node.GetFirewallConfig()
+	initialActive := bondedPacketConn.ActiveCount()
 
 	a.status = ConnectionStatus{
 		Connected:    true,
-		StatusText:   fmt.Sprintf("Connected (%d parallel streams, rtpopus3)", len(clients)),
+		StatusText:   fmt.Sprintf("Connected (%d/%d parallel streams, rtpopus3)", initialActive, streamsCount),
 		VirtualIP:    vIP,
 		Domain:       domain,
 		NodeName:     name,
@@ -165,15 +177,28 @@ func (a *App) JoinNetwork(vkLink string, nickname string, customDomain string, o
 		Link:         vkLink,
 		FirewallMode: mode,
 		SharedPorts:  ports,
-		StreamsCount: len(clients),
+		StreamsCount: initialActive,
 	}
 
 	if a.ctx != nil {
 		wailsRuntime.EventsEmit(a.ctx, "status_change", a.status)
 	}
 
-	log.Printf("[App] Network joined successfully: %s (%s, %s) with %d streams", name, vIP, domain, len(clients))
+	log.Printf("[App] Network joined successfully: %s (%s, %s) with %d streams", name, vIP, domain, initialActive)
 	return &a.status, nil
+}
+
+// ConnectPeer manually sends a discovery probe to a peer's relay address.
+func (a *App) ConnectPeer(address string) error {
+	a.mu.RLock()
+	node := a.meshNode
+	a.mu.RUnlock()
+
+	if node == nil {
+		return fmt.Errorf("mesh node is not connected")
+	}
+
+	return node.ConnectPeer(address)
 }
 
 // LeaveNetwork disconnects from the mesh network.
@@ -195,10 +220,6 @@ func (a *App) LeaveNetwork() error {
 		a.turnConn = nil
 	}
 
-	for _, c := range a.turnClients {
-		_ = c.Disconnect()
-	}
-	a.turnClients = nil
 
 	a.proxyMgr.Stop()
 

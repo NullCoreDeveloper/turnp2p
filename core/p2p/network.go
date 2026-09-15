@@ -324,6 +324,9 @@ func (n *MeshNode) handleHeartbeat(payload []byte, addr net.Addr) {
 		n.peerAddrs[hb.ID] = addr
 
 		log.Printf("[P2P Mesh] Discovered peer: %s (%s, %s) at %s", hb.Name, hb.VirtualIP, hb.Domain, addr.String())
+
+		// Mutual handshake: immediately send our heartbeat back so the other peer discovers us too!
+		go n.PingAddress(addr)
 	} else {
 		// Clean old domain key if changed
 		if peer.Domain != hb.Domain {
@@ -353,7 +356,48 @@ func (n *MeshNode) notifyPeersUpdated() {
 	}
 }
 
-// heartbeatLoop sends periodic discovery announcements to the TURN room.
+// PingAddress sends a heartbeat ping directly to target network address.
+func (n *MeshNode) PingAddress(addr net.Addr) error {
+	if n.packetConn == nil {
+		return errors.New("packet conn not initialized")
+	}
+
+	n.mu.RLock()
+	allowedPorts := make([]int, 0, len(n.firewall.AllowedPorts))
+	for p := range n.firewall.AllowedPorts {
+		allowedPorts = append(allowedPorts, p)
+	}
+	hb := HeartbeatPayload{
+		ID:          n.id,
+		Name:        n.name,
+		VirtualIP:   n.virtualIP,
+		Domain:      n.domain,
+		SharedPorts: allowedPorts,
+		Timestamp:   time.Now().UnixMilli(),
+	}
+	n.mu.RUnlock()
+
+	data, err := json.Marshal(hb)
+	if err != nil {
+		return err
+	}
+
+	frame := append([]byte{FrameHeartbeat}, data...)
+	_, err = n.packetConn.WriteTo(frame, addr)
+	return err
+}
+
+// ConnectPeer resolves a remote address string and sends a discovery ping.
+func (n *MeshNode) ConnectPeer(addrStr string) error {
+	addrStr = strings.TrimSpace(addrStr)
+	udpAddr, err := net.ResolveUDPAddr("udp", addrStr)
+	if err != nil {
+		return fmt.Errorf("invalid peer address: %w", err)
+	}
+	return n.PingAddress(udpAddr)
+}
+
+// heartbeatLoop sends periodic discovery announcements to known peers.
 func (n *MeshNode) heartbeatLoop() {
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
@@ -364,35 +408,19 @@ func (n *MeshNode) heartbeatLoop() {
 			return
 		case <-ticker.C:
 			n.mu.RLock()
-			allowedPorts := make([]int, 0, len(n.firewall.AllowedPorts))
-			for p := range n.firewall.AllowedPorts {
-				allowedPorts = append(allowedPorts, p)
-			}
-			hb := HeartbeatPayload{
-				ID:          n.id,
-				Name:        n.name,
-				VirtualIP:   n.virtualIP,
-				Domain:      n.domain,
-				SharedPorts: allowedPorts,
-				Timestamp:   time.Now().UnixMilli(),
-			}
-			n.mu.RUnlock()
-
-			data, err := json.Marshal(hb)
-			if err != nil {
-				continue
-			}
-
-			frame := append([]byte{FrameHeartbeat}, data...)
-
-			n.mu.RLock()
+			addrs := make([]net.Addr, 0, len(n.peerAddrs))
 			for _, addr := range n.peerAddrs {
-				n.packetConn.WriteTo(frame, addr)
+				addrs = append(addrs, addr)
 			}
 			n.mu.RUnlock()
+
+			for _, addr := range addrs {
+				_ = n.PingAddress(addr)
+			}
 		}
 	}
 }
+
 
 // cleanupLoop removes peers that stopped responding.
 func (n *MeshNode) cleanupLoop() {
