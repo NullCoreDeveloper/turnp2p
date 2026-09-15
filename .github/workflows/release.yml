@@ -44,21 +44,18 @@ jobs:
       - name: Install Wails CLI
         run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
 
-      - name: Build Wails App (Default WebKit2 4.0)
+      - name: Build Wails App (WebKit2 4.0 for Legacy Linux)
         run: |
           wails build -platform linux/amd64 -clean
-
-      - name: Package Linux .tar.gz (WebKit2 4.0)
-        run: |
+          mkdir -p build/dist_bin
+          cp build/bin/turnp2p build/dist_bin/turnp2p_40
           mkdir -p dist
           tar -czvf "dist/TurnP2P-linux-amd64-webkit2_40.tar.gz" -C build/bin turnp2p
 
       - name: Build Wails App (WebKit2 4.1 for Modern Linux)
         run: |
           wails build -platform linux/amd64 -tags webkit2_41 -clean
-
-      - name: Package Linux .tar.gz (WebKit2 4.1 - Ubuntu 24.04/Debian 12/Arch/Fedora)
-        run: |
+          cp build/bin/turnp2p build/dist_bin/turnp2p_41
           tar -czvf "dist/TurnP2P-linux-amd64-webkit2_41.tar.gz" -C build/bin turnp2p
 
       - name: Build Linux .deb Package
@@ -89,7 +86,7 @@ jobs:
 
           dpkg-deb --build "${DEB_DIR}" "dist/TurnP2P-linux-amd64.deb"
 
-      - name: Build Linux AppImage
+      - name: Build Universal Dual-WebKit Linux AppImage
         run: |
           VERSION=${GITHUB_REF_NAME#v}
           [ "$VERSION" = "" ] && VERSION="1.0.0"
@@ -97,7 +94,11 @@ jobs:
           mkdir -p AppDir/usr/share/applications
           mkdir -p AppDir/usr/share/icons/hicolor/512x512/apps
 
-          cp build/bin/turnp2p AppDir/usr/bin/turnp2p
+          # Include both 4.1 and 4.0 builds
+          cp build/dist_bin/turnp2p_41 AppDir/usr/bin/turnp2p_41
+          cp build/dist_bin/turnp2p_40 AppDir/usr/bin/turnp2p_40
+          chmod 755 AppDir/usr/bin/turnp2p_41 AppDir/usr/bin/turnp2p_40
+
           cp assets/turnp2p.desktop AppDir/turnp2p.desktop
           cp assets/icon.png AppDir/turnp2p.png
           cp assets/icon.png AppDir/.DirIcon
@@ -106,7 +107,16 @@ jobs:
           #!/bin/sh
           HERE="$(dirname "$(readlink -f "${0}")")"
           export PATH="${HERE}/usr/bin:${PATH}"
-          exec "${HERE}/usr/bin/turnp2p" "$@"
+
+          # Smart detection of available WebKit2GTK runtime
+          if ldconfig -p 2>/dev/null | grep -q "libwebkit2gtk-4.1.so" || [ -f /usr/lib/libwebkit2gtk-4.1.so.0 ] || [ -f /usr/lib/x86_64-linux-gnu/libwebkit2gtk-4.1.so.0 ] || [ -f /usr/lib64/libwebkit2gtk-4.1.so.0 ]; then
+              exec "${HERE}/usr/bin/turnp2p_41" "$@"
+          elif ldconfig -p 2>/dev/null | grep -q "libwebkit2gtk-4.0.so" || [ -f /usr/lib/libwebkit2gtk-4.0.so.37 ] || [ -f /usr/lib/x86_64-linux-gnu/libwebkit2gtk-4.0.so.37 ] || [ -f /usr/lib64/libwebkit2gtk-4.0.so.37 ]; then
+              exec "${HERE}/usr/bin/turnp2p_40" "$@"
+          else
+              # Fallback try 4.1 then 4.0
+              "${HERE}/usr/bin/turnp2p_41" "$@" 2>/dev/null || exec "${HERE}/usr/bin/turnp2p_40" "$@"
+          fi
           EOF
           chmod +x AppDir/AppRun
 
