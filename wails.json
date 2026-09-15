@@ -1,0 +1,13 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "turnp2p",
+  "outputfilename": "turnp2p",
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "author": {
+    "name": "NullCore Developer",
+    "email": "119652843+NullCoreDeveloper@users.noreply.github.com"
+  }
+}
