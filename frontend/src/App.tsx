@@ -60,7 +60,7 @@ export function App() {
   const [obfKey, setObfKey] = useState(() => localStorage.getItem('turnp2p_obfKey') || '');
   const [streamsCount, setStreamsCount] = useState<number>(() => {
     const saved = localStorage.getItem('turnp2p_streamsCount');
-    return saved ? parseInt(saved, 10) || 10 : 10;
+    return saved ? Math.min(parseInt(saved, 10) || 3, 5) : 3;
   });
   const [networkMode, setNetworkMode] = useState<'userspace' | 'tun'>(() => {
     const saved = localStorage.getItem('turnp2p_networkMode');
@@ -85,7 +85,7 @@ export function App() {
     domain: '',
     name: '',
     relayAddr: '',
-    streams: 10,
+    streams: 3,
     networkMode: 'userspace',
     hostsSync: false,
     obfKey: '',
@@ -178,6 +178,9 @@ export function App() {
   };
 
   const cleanErrorMessage = (raw: string): string => {
+    if (raw.includes('Quota Reached') || raw.includes('486')) {
+      return 'Лимит одновременных сессий VK TURN исчерпан. Пожалуйста, подождите 1 минуту или создайте новую ссылку на звонок.';
+    }
     if (raw.includes('error_code: 14') || raw.includes('error_code:14') || raw.includes('Captcha need')) {
       return 'Требуется проверка VK (Капча). Проверьте окно капчи...';
     }

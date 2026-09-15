@@ -63,6 +63,11 @@ func SolveCaptchaViaBrowser(ctx context.Context, redirectURI string) (string, er
 		return "", fmt.Errorf("invalid redirect_uri: %w", err)
 	}
 
+	upstreamHost := parsedTarget.Host
+	if upstreamHost == "" {
+		upstreamHost = "id.vk.ru"
+	}
+
 	tokenChan := make(chan string, 1)
 	errChan := make(chan error, 1)
 
@@ -106,7 +111,7 @@ func SolveCaptchaViaBrowser(ctx context.Context, redirectURI string) (string, er
 
 	// Reverse proxy to VK Not Robot endpoint with JS injector
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		upstreamURL := fmt.Sprintf("https://id.vk.ru%s", r.URL.RequestURI())
+		upstreamURL := fmt.Sprintf("https://%s%s", upstreamHost, r.URL.RequestURI())
 		if r.URL.Path == "/" || r.URL.Path == "" {
 			upstreamURL = redirectURI
 		}
@@ -123,10 +128,10 @@ func SolveCaptchaViaBrowser(ctx context.Context, redirectURI string) (string, er
 			}
 			req.Header[k] = v
 		}
-		req.Host = "id.vk.ru"
+		req.Host = upstreamHost
 		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
-		req.Header.Set("Origin", "https://id.vk.ru")
-		req.Header.Set("Referer", "https://id.vk.ru/")
+		req.Header.Set("Origin", fmt.Sprintf("https://%s", upstreamHost))
+		req.Header.Set("Referer", fmt.Sprintf("https://%s/", upstreamHost))
 		req.Header.Set("sec-ch-ua", `"Chromium";v="131", "Not_A Brand";v="24", "Google Chrome";v="131"`)
 		req.Header.Set("sec-ch-ua-mobile", "?0")
 		req.Header.Set("sec-ch-ua-platform", `"Windows"`)

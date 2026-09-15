@@ -370,8 +370,11 @@ func (s *captchaNotRobotSession) request(method string, values neturl.Values) (m
 	req.Header.Set("sec-ch-ua-platform", s.profile.SecChUaPlatform)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "*/*")
-	req.Header.Set("Origin", "https://vk.ru")
-	req.Header.Set("Referer", "https://vk.ru/")
+	req.Header.Set("Origin", "https://id.vk.com")
+	req.Header.Set("Referer", "https://id.vk.com/")
+	req.Header.Set("Sec-Fetch-Site", "same-site")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Dest", "empty")
 
 	httpResp, err := s.client.Do(req)
 	if err != nil {
