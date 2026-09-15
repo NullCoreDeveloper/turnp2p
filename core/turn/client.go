@@ -83,9 +83,7 @@ func (c *PionClient) Connect(ctx context.Context, creds *Credentials, obfKey str
 		Conn:           localConn,
 		Username:       creds.Username,
 		Password:       creds.Password,
-		Realm:          "ok.ru",
-		Software:       "VKCalls/1.0",
-		RTO:            time.Second * 2,
+		RTO:            time.Second * 3,
 	}
 
 	turnClient, err := turn.NewClient(clientConfig)
@@ -94,6 +92,13 @@ func (c *PionClient) Connect(ctx context.Context, creds *Credentials, obfKey str
 		return nil, fmt.Errorf("failed to create turn client: %w", err)
 	}
 	c.client = turnClient
+
+	// Start STUN/TURN listener loop
+	if err := turnClient.Listen(); err != nil {
+		turnClient.Close()
+		localConn.Close()
+		return nil, fmt.Errorf("failed to start turn listener: %w", err)
+	}
 
 	// 4. Allocate TURN relay
 	relayConn, err := turnClient.Allocate()
