@@ -2,6 +2,7 @@ package turn
 
 import (
 	"context"
+	"net"
 	"os"
 	"testing"
 	"time"
@@ -49,7 +50,17 @@ func TestLiveVKTurnRelayExchange(t *testing.T) {
 	relayAddr2 := client2.GetRelayAddress()
 	t.Logf("[Live Test] Client 2 allocated real TURN relay: %s", relayAddr2)
 
-	// 4. Send live packet from Client 1 -> Client 2 through the VK TURN relay
+	// 4. Mutual permission handshake (TURN requires both sides to send to open permissions)
+	t.Logf("[Live Test] Performing mutual permission handshake between %s <-> %s...", relayAddr1, relayAddr2)
+	_ = conn1.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = conn2.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	// Both write to open permissions on their allocated TURN relays
+	_, _ = conn1.WriteTo([]byte("HANDSHAKE_1"), relayAddr2)
+	_, _ = conn2.WriteTo([]byte("HANDSHAKE_2"), relayAddr1)
+	time.Sleep(150 * time.Millisecond)
+
+	// 5. Send live payload from Client 1 -> Client 2 through the VK TURN relay
 	sendPayload := []byte("LIVE_VK_TURN_P2P_PAYLOAD_TEST_42")
 	t.Logf("[Live Test] Client 1 -> Client 2 (sending %d bytes through %s)...", len(sendPayload), creds.ServerAddr)
 
@@ -59,12 +70,20 @@ func TestLiveVKTurnRelayExchange(t *testing.T) {
 		t.Fatalf("[Live Test] Client 1 WriteTo failed: %v", err)
 	}
 
-	// 5. Read on Client 2
+	// 6. Read on Client 2
 	recvBuf := make([]byte, 1024)
-	_ = conn2.SetReadDeadline(time.Now().Add(10 * time.Second))
-	n, addr, err := conn2.ReadFrom(recvBuf)
-	if err != nil {
-		t.Fatalf("[Live Test] Client 2 failed to receive packet from TURN relay: %v", err)
+	_ = conn2.SetReadDeadline(time.Now().Add(6 * time.Second))
+	var n int
+	var addr net.Addr
+	for {
+		n, addr, err = conn2.ReadFrom(recvBuf)
+		if err != nil {
+			t.Fatalf("[Live Test] Client 2 failed to receive packet from TURN relay: %v", err)
+		}
+		if string(recvBuf[:n]) == "HANDSHAKE_1" {
+			continue // Skip initial handshake packet
+		}
+		break
 	}
 	t.Logf("[Live Test] Client 2 received %d bytes from %s: %q", n, addr, string(recvBuf[:n]))
 
@@ -80,9 +99,16 @@ func TestLiveVKTurnRelayExchange(t *testing.T) {
 	}
 
 	_ = conn1.SetReadDeadline(time.Now().Add(10 * time.Second))
-	n2, _, err := conn1.ReadFrom(recvBuf)
-	if err != nil {
-		t.Fatalf("[Live Test] Client 1 failed to receive reply: %v", err)
+	var n2 int
+	for {
+		n2, _, err = conn1.ReadFrom(recvBuf)
+		if err != nil {
+			t.Fatalf("[Live Test] Client 1 failed to receive reply: %v", err)
+		}
+		if string(recvBuf[:n2]) == "HANDSHAKE_2" {
+			continue // Skip initial handshake packet
+		}
+		break
 	}
 
 	rtt := time.Since(startPing)

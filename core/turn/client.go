@@ -53,6 +53,14 @@ func (c *PionClient) ResolveCredentials(ctx context.Context, link string) (*Cred
 	return FetchVKTurnCredentials(ctx, link)
 }
 
+type connectedUDPConn struct {
+	*net.UDPConn
+}
+
+func (c *connectedUDPConn) WriteTo(p []byte, _ net.Addr) (int, error) {
+	return c.Write(p)
+}
+
 // Connect establishes a TURN relay allocation and wraps it with rtpopus3 obfuscation.
 func (c *PionClient) Connect(ctx context.Context, creds *Credentials, obfKey string) (net.PacketConn, error) {
 	c.mu.Lock()
@@ -69,18 +77,19 @@ func (c *PionClient) Connect(ctx context.Context, creds *Credentials, obfKey str
 		return nil, fmt.Errorf("failed to resolve TURN server address %s: %w", serverAddr, err)
 	}
 
-	// 2. Open local UDP socket for TURN communication
-	localConn, err := net.ListenPacket("udp", "0.0.0.0:0")
+	// 2. Open connected UDP socket directly to TURN server
+	udpConn, err := net.DialUDP("udp", nil, turnUDPAddr)
 	if err != nil {
-		return nil, fmt.Errorf("failed to listen on local UDP port: %w", err)
+		return nil, fmt.Errorf("failed to dial TURN UDP socket: %w", err)
 	}
-	c.rawConn = localConn
+	turnConn := &connectedUDPConn{udpConn}
+	c.rawConn = turnConn
 
 	// 3. Create Pion TURN client
 	clientConfig := &turn.ClientConfig{
 		STUNServerAddr: turnUDPAddr.String(),
 		TURNServerAddr: turnUDPAddr.String(),
-		Conn:           localConn,
+		Conn:           turnConn,
 		Username:       creds.Username,
 		Password:       creds.Password,
 		RTO:            time.Second * 3,
@@ -88,7 +97,7 @@ func (c *PionClient) Connect(ctx context.Context, creds *Credentials, obfKey str
 
 	turnClient, err := turn.NewClient(clientConfig)
 	if err != nil {
-		localConn.Close()
+		_ = turnConn.Close()
 		return nil, fmt.Errorf("failed to create turn client: %w", err)
 	}
 	c.client = turnClient
@@ -96,15 +105,26 @@ func (c *PionClient) Connect(ctx context.Context, creds *Credentials, obfKey str
 	// Start STUN/TURN listener loop
 	if err := turnClient.Listen(); err != nil {
 		turnClient.Close()
-		localConn.Close()
+		_ = turnConn.Close()
 		return nil, fmt.Errorf("failed to start turn listener: %w", err)
 	}
 
-	// 4. Allocate TURN relay
-	relayConn, err := turnClient.Allocate()
+	// 4. Allocate TURN relay with retry on stale nonce (438)
+	var relayConn net.PacketConn
+	for attempt := 1; attempt <= 3; attempt++ {
+		relayConn, err = turnClient.Allocate()
+		if err == nil {
+			break
+		}
+		if strings.Contains(err.Error(), "438") || strings.Contains(err.Error(), "nonce") {
+			time.Sleep(120 * time.Millisecond)
+			continue
+		}
+		break
+	}
 	if err != nil {
 		turnClient.Close()
-		localConn.Close()
+		_ = turnConn.Close()
 		return nil, fmt.Errorf("failed to allocate TURN relay: %w", err)
 	}
 
@@ -115,7 +135,7 @@ func (c *PionClient) Connect(ctx context.Context, creds *Credentials, obfKey str
 	if err != nil {
 		relayConn.Close()
 		turnClient.Close()
-		localConn.Close()
+		_ = turnConn.Close()
 		return nil, fmt.Errorf("failed to initialize rtpopus3 obfuscator: %w", err)
 	}
 	c.obfuscator = obfuscator
