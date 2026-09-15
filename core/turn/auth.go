@@ -243,6 +243,8 @@ func FetchVKTurnCredentials(ctx context.Context, link string) (*Credentials, err
 			continue
 		}
 
+		log.Printf("[VK Auth] vchat.joinConversationByLink response: %v", resp4)
+
 		tsRaw, ok := resp4["turn_server"].(map[string]interface{})
 		if !ok {
 			lastErr = fmt.Errorf("отсутствуют данные turn_server в ответе комнаты (возможно, звонок завершен)")
@@ -269,12 +271,13 @@ func FetchVKTurnCredentials(ctx context.Context, link string) (*Credentials, err
 		clean := strings.Split(urlStr, "?")[0]
 		address := strings.TrimPrefix(strings.TrimPrefix(clean, "turn:"), "turns:")
 
-		log.Printf("[VK Auth] Successfully extracted TURN server: %s with user: %s (via %s)", address, user, creds.Name)
+		wsEndpoint, _ := resp4["endpoint"].(string)
 
 		result := &Credentials{
 			Username:   user,
 			Password:   pass,
 			ServerAddr: address,
+			WsEndpoint: wsEndpoint,
 			ExpiresAt:  time.Now().Add(10 * time.Minute),
 			Link:       cleanLink,
 		}

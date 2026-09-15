@@ -45,6 +45,7 @@ type App struct {
 	proxyMgr     *proxy.Manager
 	hostsMgr     *hosts.Manager
 	tunRouter    *tun.Router
+	sigClient    *turn.SignalingClient
 	networkMode  string // "userspace" (default) or "tun"
 	status       ConnectionStatus
 	mu           sync.RWMutex
@@ -210,7 +211,26 @@ func (a *App) JoinNetwork(vkLink string, nickname string, customDomain string, o
 		relayAddrStr = addr.String()
 	}
 
-	// 4. If TUN mode requested, attempt to create and start TUN Device
+	// 4. Start automatic signaling exchange via VK Call WebSocket if available
+	if creds.WsEndpoint != "" {
+		id, _, _, _ := node.GetInfo()
+		sig := turn.NewSignalingClient(creds.WsEndpoint, vkLink, obfKey)
+		localInfo := turn.SignalingPeerInfo{
+			ID:          id,
+			Name:        name,
+			RelayAddr:   relayAddrStr,
+			VirtualIP:   vIP,
+			Domain:      domain,
+			SharedPorts: ports,
+		}
+		sig.Start(context.Background(), localInfo, func(peerRelayAddr string) {
+			log.Printf("[App] Discovered peer relay via signaling: %s, connecting...", peerRelayAddr)
+			_ = node.ConnectPeer(peerRelayAddr)
+		})
+		a.sigClient = sig
+	}
+
+	// 5. If TUN mode requested, attempt to create and start TUN Device
 	activeMode := a.networkMode
 	if activeMode == "tun" {
 		tunDev, tunErr := tun.OpenDevice("turnp2p0", vIP)
@@ -278,6 +298,11 @@ func (a *App) LeaveNetwork() error {
 
 	if !a.status.Connected {
 		return nil
+	}
+
+	if a.sigClient != nil {
+		a.sigClient.Stop()
+		a.sigClient = nil
 	}
 
 	if a.tunRouter != nil {

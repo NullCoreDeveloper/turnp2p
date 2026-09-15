@@ -9,6 +9,7 @@ type Credentials struct {
 	Username   string    `json:"username"`
 	Password   string    `json:"password"`
 	ServerAddr string    `json:"serverAddr"`
+	WsEndpoint string    `json:"wsEndpoint"`
 	ExpiresAt  time.Time `json:"expiresAt"`
 	Link       string    `json:"link"`
 }

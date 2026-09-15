@@ -37,6 +37,7 @@ declare global {
           LeaveNetwork: () => Promise<void>;
           GetStatus: () => Promise<ConnectionStatus>;
           GetPeers: () => Promise<Peer[]>;
+          ConnectPeer: (address: string) => Promise<void>;
           GenerateRandomKey: () => Promise<string>;
           SetFirewallMode: (mode: string) => Promise<void>;
           AllowInboundPort: (port: number) => Promise<void>;
@@ -68,10 +69,13 @@ export function App() {
   const [isConnected, setIsConnected] = useState(false);
   const [statusText, setStatusText] = useState('Отключено');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [manualPeerAddr, setManualPeerAddr] = useState('');
+  const [manualConnectMsg, setManualConnectMsg] = useState<string | null>(null);
   const [localInfo, setLocalInfo] = useState<{
     virtualIp: string;
     domain: string;
     name: string;
+    relayAddr: string;
     streams: number;
     networkMode: string;
     hostsSync: boolean;
@@ -80,6 +84,7 @@ export function App() {
     virtualIp: '',
     domain: '',
     name: '',
+    relayAddr: '',
     streams: 10,
     networkMode: 'userspace',
     hostsSync: false,
@@ -137,6 +142,7 @@ export function App() {
             virtualIp: status.virtualIp,
             domain: status.domain,
             name: status.nodeName,
+            relayAddr: status.relayAddr || '',
             streams: status.streamsCount || 10,
             networkMode: status.networkMode || 'userspace',
             hostsSync: status.hostsSync ?? true,
@@ -188,6 +194,24 @@ export function App() {
     }
   };
 
+  const handleManualConnectPeer = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const addr = manualPeerAddr.trim();
+    if (!addr) return;
+
+    try {
+      if (window.go?.main?.App?.ConnectPeer) {
+        await window.go.main.App.ConnectPeer(addr);
+      }
+      setManualConnectMsg(`Запрос отправлен на ${addr}`);
+      setTimeout(() => setManualConnectMsg(null), 3000);
+      setManualPeerAddr('');
+    } catch (err: any) {
+      setManualConnectMsg(`Ошибка: ${err?.message || err}`);
+      setTimeout(() => setManualConnectMsg(null), 4000);
+    }
+  };
+
   const handleConnect = async () => {
     if (!vkLink) return;
     setErrorMessage(null);
@@ -202,6 +226,7 @@ export function App() {
           virtualIp: res.virtualIp,
           domain: res.domain,
           name: res.nodeName,
+          relayAddr: res.relayAddr || '',
           streams: res.streamsCount || streamsCount,
           networkMode: res.networkMode || networkMode,
           hostsSync: res.hostsSync ?? true,
@@ -221,6 +246,7 @@ export function App() {
           virtualIp: '10.42.18.5',
           domain: customDomain ? `${customDomain}.vkturn` : `${nickname || 'NetHunter'}.vkturn`,
           name: nickname || 'NetHunter',
+          relayAddr: '91.231.135.87:54321',
           streams: streamsCount,
           networkMode: networkMode,
           hostsSync: true,
@@ -518,8 +544,25 @@ export function App() {
                     </div>
                   </div>
 
+                  {localInfo.relayAddr && (
+                    <div style={{ marginTop: '8px', fontSize: '0.82rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'rgba(255,255,255,0.04)', padding: '6px 10px', borderRadius: '6px' }}>
+                      <div>
+                        <span style={{ color: 'var(--text-muted)' }}>Ваш TURN Relay: </span>
+                        <code style={{ color: '#38bdf8', fontWeight: 600 }}>{localInfo.relayAddr}</code>
+                      </div>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        style={{ padding: '2px 8px', fontSize: '0.72rem' }}
+                        onClick={() => copyToClipboard(localInfo.relayAddr, 'Relay адрес')}
+                      >
+                        Копировать Relay
+                      </button>
+                    </div>
+                  )}
+
                   {/* Compact Obfuscation Key Row */}
-                  <div style={{ marginTop: '10px', padding: '8px 10px', background: 'rgba(0,0,0,0.2)', borderRadius: '8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.78rem' }}>
+                  <div style={{ marginTop: '8px', padding: '8px 10px', background: 'rgba(0,0,0,0.2)', borderRadius: '8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.78rem' }}>
                     <div style={{ color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '6px' }}>
                       <span>🔑 Ключ маскировки:</span>
                       <span style={{ fontFamily: 'monospace', color: '#93c5fd' }}>
@@ -553,8 +596,32 @@ export function App() {
                 <div className="card">
                   <div className="card-header">
                     <span className="card-title">Участники в комнате ({peers.length})</span>
-                    <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Порты пробрасываются автоматически</span>
+                    <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Авто-обмен через WebSocket</span>
                   </div>
+
+                  {/* Manual peer connect helper */}
+                  <form onSubmit={handleManualConnectPeer} style={{ display: 'flex', gap: '8px', marginBottom: '12px', background: 'rgba(255,255,255,0.03)', padding: '8px', borderRadius: '8px' }}>
+                    <input
+                      className="input"
+                      style={{ padding: '6px 10px', fontSize: '0.8rem', flex: 1 }}
+                      placeholder="Relay друга (напр. 91.231.135.87:51234)"
+                      value={manualPeerAddr}
+                      onChange={e => setManualPeerAddr(e.target.value)}
+                    />
+                    <button
+                      type="submit"
+                      className="btn btn-secondary btn-sm"
+                      style={{ whiteSpace: 'nowrap', padding: '6px 12px', fontSize: '0.78rem' }}
+                    >
+                      🔗 Прямой коннект
+                    </button>
+                  </form>
+                  {manualConnectMsg && (
+                    <p style={{ fontSize: '0.75rem', color: manualConnectMsg.includes('Ошибка') ? '#fca5a5' : '#34d399', marginBottom: '8px' }}>
+                      {manualConnectMsg}
+                    </p>
+                  )}
+
                   {peers.length === 0 ? (
                     <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', textAlign: 'center', padding: '16px 0' }}>
                       Ожидание обнаружения других участников в комнате...
