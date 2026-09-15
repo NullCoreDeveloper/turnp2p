@@ -73,7 +73,7 @@ type captchaBootstrap struct {
 func AutoSolveVkCaptcha(ctx context.Context, redirectURI string, sessionToken string, client tlsclient.HttpClient, profile Profile) (string, error) {
 	log.Printf("[Auto Captcha] Starting background captcha solver...")
 
-	bootstrap, err := fetchCaptchaBootstrap(ctx, redirectURI, client, profile)
+	bootstrap, err := fetchCaptchaBootstrap(ctx, redirectURI, sessionToken, client, profile)
 	if err != nil {
 		return "", fmt.Errorf("failed to fetch captcha bootstrap: %w", err)
 	}
@@ -116,7 +116,7 @@ func solvePoW(powInput string, difficulty int) string {
 	return ""
 }
 
-func fetchCaptchaBootstrap(ctx context.Context, redirectURI string, client tlsclient.HttpClient, profile Profile) (*captchaBootstrap, error) {
+func fetchCaptchaBootstrap(ctx context.Context, redirectURI string, sessionToken string, client tlsclient.HttpClient, profile Profile) (*captchaBootstrap, error) {
 	parsedURL, err := neturl.Parse(redirectURI)
 	if err != nil {
 		return nil, err
@@ -149,20 +149,20 @@ func fetchCaptchaBootstrap(ctx context.Context, redirectURI string, client tlscl
 		return nil, err
 	}
 
-	return parseCaptchaBootstrapHTML(string(bodyBytes))
+	return parseCaptchaBootstrapHTML(string(bodyBytes), sessionToken)
 }
 
-func parseCaptchaBootstrapHTML(html string) (*captchaBootstrap, error) {
-	powInputRe := regexp.MustCompile(`const\s+powInput\s*=\s*"([^"]+)"`)
-	powInputMatch := powInputRe.FindStringSubmatch(html)
-	if len(powInputMatch) < 2 {
-		return nil, fmt.Errorf("powInput not found in captcha HTML")
+func parseCaptchaBootstrapHTML(html string, sessionToken string) (*captchaBootstrap, error) {
+	powInput := sessionToken
+	powInputRe := regexp.MustCompile(`(?:const\s+powInput|pow_input|powInput)\s*=\s*"([^"]+)"`)
+	if match := powInputRe.FindStringSubmatch(html); len(match) >= 2 {
+		powInput = match[1]
 	}
 
 	difficulty := 2
 	for _, expr := range []*regexp.Regexp{
 		regexp.MustCompile(`startsWith\('0'\.repeat\((\d+)\)\)`),
-		regexp.MustCompile(`const\s+difficulty\s*=\s*(\d+)`),
+		regexp.MustCompile(`(?:const\s+difficulty|difficulty)\s*=\s*(\d+)`),
 	} {
 		if match := expr.FindStringSubmatch(html); len(match) >= 2 {
 			if parsed, err := strconv.Atoi(match[1]); err == nil {
@@ -173,12 +173,15 @@ func parseCaptchaBootstrapHTML(html string) (*captchaBootstrap, error) {
 	}
 
 	settings, err := parseCaptchaSettingsFromHTML(html)
-	if err != nil {
-		return nil, err
+	if err != nil || settings == nil {
+		settings = &captchaSettingsResponse{
+			ShowCaptchaType: "checkbox",
+			SettingsByType:  make(map[string]string),
+		}
 	}
 
 	return &captchaBootstrap{
-		PowInput:   powInputMatch[1],
+		PowInput:   powInput,
 		Difficulty: difficulty,
 		Settings:   settings,
 	}, nil
