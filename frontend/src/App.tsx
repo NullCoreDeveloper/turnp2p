@@ -11,16 +11,6 @@ interface Peer {
   ping: number;
 }
 
-interface ForwardRule {
-  id: string;
-  name: string;
-  protocol: string;
-  localPort: number;
-  remoteIp: string;
-  remotePort: number;
-  enabled: boolean;
-}
-
 interface ConnectionStatus {
   connected: boolean;
   statusText: string;
@@ -29,6 +19,7 @@ interface ConnectionStatus {
   nodeName: string;
   relayAddr: string;
   obfProfile: string;
+  obfKey?: string;
   link: string;
   firewallMode?: string;
   sharedPorts?: number[];
@@ -46,9 +37,6 @@ declare global {
           LeaveNetwork: () => Promise<void>;
           GetStatus: () => Promise<ConnectionStatus>;
           GetPeers: () => Promise<Peer[]>;
-          AddForwardRule: (rule: Partial<ForwardRule>) => Promise<void>;
-          RemoveForwardRule: (id: string) => Promise<void>;
-          GetForwardRules: () => Promise<ForwardRule[]>;
           GenerateRandomKey: () => Promise<string>;
           SetFirewallMode: (mode: string) => Promise<void>;
           AllowInboundPort: (port: number) => Promise<void>;
@@ -64,7 +52,7 @@ declare global {
 }
 
 export function App() {
-  const [activeTab, setActiveTab] = useState<'network' | 'forwarding' | 'firewall' | 'obfuscation'>('network');
+  const [activeTab, setActiveTab] = useState<'network' | 'firewall'>('network');
   const [vkLink, setVkLink] = useState('');
   const [nickname, setNickname] = useState('');
   const [customDomain, setCustomDomain] = useState('');
@@ -74,31 +62,30 @@ export function App() {
   const [isConnected, setIsConnected] = useState(false);
   const [statusText, setStatusText] = useState('Отключено');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [localInfo, setLocalInfo] = useState<{ virtualIp: string; domain: string; name: string; streams: number; networkMode: string; hostsSync: boolean }>({
+  const [localInfo, setLocalInfo] = useState<{
+    virtualIp: string;
+    domain: string;
+    name: string;
+    streams: number;
+    networkMode: string;
+    hostsSync: boolean;
+    obfKey: string;
+  }>({
     virtualIp: '',
     domain: '',
     name: '',
     streams: 10,
     networkMode: 'userspace',
     hostsSync: false,
+    obfKey: '',
   });
   const [peers, setPeers] = useState<Peer[]>([]);
-  const [forwardRules, setForwardRules] = useState<ForwardRule[]>([]);
   const [copiedText, setCopiedText] = useState<string | null>(null);
 
   // Firewall state
   const [firewallMode, setFirewallMode] = useState<string>('whitelist');
   const [allowedPorts, setAllowedPorts] = useState<number[]>([25565]);
   const [newAllowedPort, setNewAllowedPort] = useState('');
-
-  // Port Forwarding state
-  const [newRule, setNewRule] = useState({
-    name: '',
-    localPort: '',
-    remoteIp: '',
-    remotePort: '',
-    protocol: 'TCP',
-  });
 
   useEffect(() => {
     generateNewKey();
@@ -119,6 +106,7 @@ export function App() {
             streams: status.streamsCount || 10,
             networkMode: status.networkMode || 'userspace',
             hostsSync: status.hostsSync ?? true,
+            obfKey: status.obfKey || obfKey,
           });
           if (status.firewallMode) setFirewallMode(status.firewallMode);
           if (status.sharedPorts) setAllowedPorts(status.sharedPorts);
@@ -143,15 +131,15 @@ export function App() {
     }
   };
 
-  const copyToClipboard = (text: string) => {
+  const copyToClipboard = (text: string, label?: string) => {
     navigator.clipboard.writeText(text);
-    setCopiedText(text);
-    setTimeout(() => setCopiedText(null), 2000);
+    setCopiedText(label || text);
+    setTimeout(() => setCopiedText(null), 2500);
   };
 
   const cleanErrorMessage = (raw: string): string => {
     if (raw.includes('error_code: 14') || raw.includes('error_code:14') || raw.includes('Captcha need')) {
-      return 'Требуется проверка VK (Капча). Открывается окно браузера для подтверждения...';
+      return 'Требуется проверка VK (Капча). Проверьте окно капчи...';
     }
     if (raw.includes('не удалось получить TURN данные')) {
       return 'Не удалось подключиться к VK звонку. Проверьте правильность ссылки.';
@@ -163,42 +151,6 @@ export function App() {
     setNetworkMode(mode);
     if (window.go?.main?.App?.SetNetworkMode) {
       await window.go.main.App.SetNetworkMode(mode);
-    }
-  };
-
-  const handleQuickForward = async (peer: Peer, port: number) => {
-    const targetAddr = peer.domain || peer.virtualIp;
-    const ruleObj: Partial<ForwardRule> = {
-      name: `${peer.name} :${port}`,
-      localPort: port,
-      remoteIp: targetAddr,
-      remotePort: port,
-      protocol: 'TCP',
-    };
-
-    if (window.go?.main?.App?.AddForwardRule) {
-      try {
-        await window.go.main.App.AddForwardRule(ruleObj);
-        const rules = await window.go.main.App.GetForwardRules();
-        setForwardRules(rules);
-        alert(`Проброс 127.0.0.1:${port} ➔ ${targetAddr}:${port} успешно активирован! Вы можете подключаться в игре по адресу ${targetAddr}:${port} или 127.0.0.1:${port}`);
-      } catch (err: any) {
-        alert(err?.message || String(err));
-      }
-    } else {
-      setForwardRules(prev => [
-        ...prev,
-        {
-          id: Math.random().toString(),
-          name: ruleObj.name!,
-          localPort: ruleObj.localPort!,
-          remoteIp: ruleObj.remoteIp!,
-          remotePort: ruleObj.remotePort!,
-          protocol: ruleObj.protocol!,
-          enabled: true,
-        },
-      ]);
-      alert(`Проброс 127.0.0.1:${port} ➔ ${targetAddr}:${port} активирован (демо-режим)`);
     }
   };
 
@@ -219,6 +171,7 @@ export function App() {
           streams: res.streamsCount || streamsCount,
           networkMode: res.networkMode || networkMode,
           hostsSync: res.hostsSync ?? true,
+          obfKey: res.obfKey || obfKey,
         });
       } catch (err: any) {
         const rawErr = err?.message || String(err);
@@ -237,6 +190,7 @@ export function App() {
           streams: streamsCount,
           networkMode: networkMode,
           hostsSync: true,
+          obfKey: obfKey || '342b8fdbfcb5b548405c56ea37f1856e6776629b1554d2d2005f8d343527f253',
         });
         setPeers([
           {
@@ -245,7 +199,7 @@ export function App() {
             virtualIp: '10.42.18.6',
             domain: 'mc-server.vkturn',
             relayAddr: '185.100.22.1:3478',
-            sharedPorts: [25565, 8080],
+            sharedPorts: [25565],
             ping: 18,
           },
         ]);
@@ -292,61 +246,13 @@ export function App() {
     }
   };
 
-  const handleAddRule = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newRule.localPort || !newRule.remoteIp || !newRule.remotePort) return;
-
-    const ruleObj: Partial<ForwardRule> = {
-      name: newRule.name || `Forward ${newRule.localPort}`,
-      localPort: parseInt(newRule.localPort, 10),
-      remoteIp: newRule.remoteIp,
-      remotePort: parseInt(newRule.remotePort, 10),
-      protocol: newRule.protocol,
-    };
-
-    if (window.go?.main?.App?.AddForwardRule) {
-      try {
-        await window.go.main.App.AddForwardRule(ruleObj);
-        const rules = await window.go.main.App.GetForwardRules();
-        setForwardRules(rules);
-      } catch (err: any) {
-        alert(err?.message || err);
-      }
-    } else {
-      setForwardRules(prev => [
-        ...prev,
-        {
-          id: Math.random().toString(),
-          name: ruleObj.name!,
-          localPort: ruleObj.localPort!,
-          remoteIp: ruleObj.remoteIp!,
-          remotePort: ruleObj.remotePort!,
-          protocol: ruleObj.protocol!,
-          enabled: true,
-        },
-      ]);
-    }
-
-    setNewRule({ name: '', localPort: '', remoteIp: '', remotePort: '', protocol: 'TCP' });
-  };
-
-  const handleRemoveRule = async (id: string) => {
-    if (window.go?.main?.App?.RemoveForwardRule) {
-      await window.go.main.App.RemoveForwardRule(id);
-      const rules = await window.go.main.App.GetForwardRules();
-      setForwardRules(rules);
-    } else {
-      setForwardRules(prev => prev.filter(r => r.id !== id));
-    }
-  };
-
   return (
     <div className="main-container">
       {/* App Header */}
       <div className="app-header">
         <div>
           <h1 className="app-title">TurnP2P</h1>
-          <p className="app-subtitle">Виртуальная P2P сеть поверх VK TURN</p>
+          <p className="app-subtitle">Виртуальная P2P сеть поверх VK TURN (WebRTC rtpopus3)</p>
         </div>
         <div className="status-badge">
           <div
@@ -392,7 +298,7 @@ export function App() {
         </div>
       )}
 
-      {/* Tabs */}
+      {/* Tabs (Clean 2-Tab Navigation) */}
       <div className="tab-bar">
         <button
           className={`tab-btn ${activeTab === 'network' ? 'active' : ''}`}
@@ -405,36 +311,13 @@ export function App() {
           Сеть
         </button>
         <button
-          className={`tab-btn ${activeTab === 'forwarding' ? 'active' : ''}`}
-          onClick={() => setActiveTab('forwarding')}
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <polyline points="16 3 21 3 21 8" />
-            <line x1="4" y1="20" x2="21" y2="3" />
-            <polyline points="21 16 21 21 16 21" />
-            <line x1="15" y1="15" x2="21" y2="21" />
-            <line x1="4" y1="4" x2="9" y2="9" />
-          </svg>
-          Проброс портов
-        </button>
-        <button
           className={`tab-btn ${activeTab === 'firewall' ? 'active' : ''}`}
           onClick={() => setActiveTab('firewall')}
         >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
           </svg>
-          Брандмауэр
-        </button>
-        <button
-          className={`tab-btn ${activeTab === 'obfuscation' ? 'active' : ''}`}
-          onClick={() => setActiveTab('obfuscation')}
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
-            <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-          </svg>
-          Маскировка (rtpopus3)
+          Брандмауэр / Доступ
         </button>
       </div>
 
@@ -484,7 +367,7 @@ export function App() {
                 <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '12px' }}>
                   <div className="input-group">
                     <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                      <label htmlFor="obf-key">Ключ маскировки rtpopus3</label>
+                      <label htmlFor="obf-key">Ключ шифрования rtpopus3</label>
                       <span
                         style={{ fontSize: '0.72rem', color: 'var(--accent)', cursor: 'pointer' }}
                         onClick={generateNewKey}
@@ -539,8 +422,8 @@ export function App() {
                   </div>
                   <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '4px' }}>
                     {networkMode === 'userspace'
-                      ? '✓ Не требует прав администратора. Имена *.vkturn маппятся на 127.0.0.1 через hosts для локального проксирования.'
-                      : '✓ Создает виртуальный сетевой интерфейс turnp2p0 (10.42.0.0/16). Требует root/admin.'}
+                      ? '✓ Автоматический проброс портов в фоне. Имена *.vkturn синхронизируются в hosts.'
+                      : '✓ Создает системный интерфейс turnp2p0 (10.42.0.0/16). Требует root/admin.'}
                   </div>
                 </div>
 
@@ -565,10 +448,17 @@ export function App() {
                     <span className="card-title">Локальный узел</span>
                     <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
                       <span className="badge" style={{ color: '#34d399', background: 'rgba(52, 211, 153, 0.15)' }}>
-                        {localInfo.networkMode === 'tun' ? '🛡️ TUN L3' : '👤 Userspace + Hosts'}
+                        {localInfo.networkMode === 'tun' ? '🛡️ TUN L3' : '👤 Userspace'}
                       </span>
                       <span className="badge" style={{ color: '#60a5fa' }}>{localInfo.streams} Потоков</span>
-                      <span className="badge obf">rtpopus3</span>
+                      <span
+                        className="badge obf"
+                        style={{ cursor: 'pointer' }}
+                        onClick={() => copyToClipboard(localInfo.obfKey, 'Ключ шифрования')}
+                        title="Нажмите для копирования ключа шифрования rtpopus3"
+                      >
+                        🔒 rtpopus3
+                      </span>
                     </div>
                   </div>
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', fontSize: '0.88rem' }}>
@@ -576,7 +466,7 @@ export function App() {
                       <span style={{ color: 'var(--text-muted)' }}>Виртуальный IP: </span>
                       <strong
                         style={{ cursor: 'pointer', color: '#60a5fa' }}
-                        onClick={() => copyToClipboard(localInfo.virtualIp)}
+                        onClick={() => copyToClipboard(localInfo.virtualIp, 'Виртуальный IP')}
                         title="Нажмите для копирования"
                       >
                         {localInfo.virtualIp}
@@ -586,21 +476,40 @@ export function App() {
                       <span style={{ color: 'var(--text-muted)' }}>Домен: </span>
                       <strong
                         style={{ cursor: 'pointer', color: '#c084fc' }}
-                        onClick={() => copyToClipboard(localInfo.domain)}
+                        onClick={() => copyToClipboard(localInfo.domain, 'Домен')}
                         title="Нажмите для копирования"
                       >
                         {localInfo.domain}
                       </strong>
                     </div>
                   </div>
+
+                  {/* Compact Obfuscation Key Row */}
+                  <div style={{ marginTop: '10px', padding: '8px 10px', background: 'rgba(0,0,0,0.2)', borderRadius: '8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.78rem' }}>
+                    <div style={{ color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <span>🔑 Ключ маскировки:</span>
+                      <span style={{ fontFamily: 'monospace', color: '#93c5fd' }}>
+                        {localInfo.obfKey ? `${localInfo.obfKey.substring(0, 16)}...${localInfo.obfKey.substring(localInfo.obfKey.length - 8)}` : 'Не задан'}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      style={{ padding: '2px 8px', fontSize: '0.72rem' }}
+                      onClick={() => copyToClipboard(localInfo.obfKey, 'Ключ маскировки')}
+                    >
+                      Копировать
+                    </button>
+                  </div>
+
                   {localInfo.hostsSync && (
-                    <div style={{ fontSize: '0.75rem', color: '#34d399', marginTop: '6px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                    <div style={{ fontSize: '0.75rem', color: '#34d399', marginTop: '8px', display: 'flex', alignItems: 'center', gap: '4px' }}>
                       <span>✓</span>
-                      <span>Файл hosts синхронизирован: домен <strong>{localInfo.domain}</strong> и домены пиров доступны для прямого подключения в играх</span>
+                      <span>Файл hosts синхронизирован: домены <strong>*.vkturn</strong> доступны для прямого подключения</span>
                     </div>
                   )}
                   {copiedText && (
-                    <p style={{ fontSize: '0.75rem', color: 'var(--success)', marginTop: '4px' }}>
+                    <p style={{ fontSize: '0.75rem', color: 'var(--success)', marginTop: '6px' }}>
                       Скопировано в буфер обмена: {copiedText}
                     </p>
                   )}
@@ -610,39 +519,39 @@ export function App() {
                 <div className="card">
                   <div className="card-header">
                     <span className="card-title">Участники в комнате ({peers.length})</span>
+                    <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Порты пробрасываются автоматически</span>
                   </div>
                   {peers.length === 0 ? (
-                    <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', textAlign: 'center', padding: '12px 0' }}>
+                    <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', textAlign: 'center', padding: '16px 0' }}>
                       Ожидание обнаружения других участников в комнате...
                     </p>
                   ) : (
                     peers.map(p => (
-                      <div key={p.id} className="peer-row" style={{ alignItems: 'flex-start' }}>
+                      <div key={p.id} className="peer-row" style={{ alignItems: 'center' }}>
                         <div style={{ flex: 1 }}>
-                          <strong>{p.name}</strong>
-                          <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '2px' }}>
-                            <span
-                              style={{ color: '#c084fc', cursor: 'pointer' }}
-                              onClick={() => copyToClipboard(p.domain)}
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <strong>{p.name}</strong>
+                            <strong
+                              style={{ color: '#c084fc', cursor: 'pointer', fontSize: '0.82rem' }}
+                              onClick={() => copyToClipboard(p.domain, `Домен ${p.domain}`)}
                               title="Нажмите для копирования домена"
                             >
                               {p.domain}
-                            </span>
+                            </strong>
                           </div>
                           {p.sharedPorts && p.sharedPorts.length > 0 && (
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '6px', flexWrap: 'wrap' }}>
-                              <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Открытые порты:</span>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '4px', flexWrap: 'wrap' }}>
+                              <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Открытые сервисы:</span>
                               {p.sharedPorts.map(port => (
-                                <button
+                                <span
                                   key={port}
-                                  type="button"
-                                  onClick={() => handleQuickForward(p, port)}
-                                  className="btn btn-secondary btn-sm"
-                                  style={{ padding: '2px 6px', fontSize: '0.72rem', background: 'rgba(59, 130, 246, 0.2)', border: '1px solid rgba(59, 130, 246, 0.4)' }}
-                                  title={`Кликните для проброса порта ${port} на 127.0.0.1`}
+                                  className="badge"
+                                  style={{ padding: '2px 6px', fontSize: '0.72rem', background: 'rgba(52, 211, 153, 0.15)', color: '#34d399', border: '1px solid rgba(52, 211, 153, 0.3)', cursor: 'pointer' }}
+                                  onClick={() => copyToClipboard(`${p.domain}:${port}`, `${p.domain}:${port}`)}
+                                  title={`Кликните чтобы скопировать адрес ${p.domain}:${port} для игры`}
                                 >
-                                  🔗 :{port} (Подключить)
-                                </button>
+                                  :{port} (Готов)
+                                </span>
                               ))}
                             </div>
                           )}
@@ -651,8 +560,8 @@ export function App() {
                           <span
                             className="badge"
                             style={{ cursor: 'pointer' }}
-                            onClick={() => copyToClipboard(p.domain || p.virtualIp)}
-                            title="Копировать адрес"
+                            onClick={() => copyToClipboard(p.virtualIp, `IP ${p.virtualIp}`)}
+                            title="Копировать IP"
                           >
                             {p.virtualIp}
                           </span>
@@ -672,104 +581,6 @@ export function App() {
                 </button>
               </div>
             )}
-          </div>
-        )}
-
-        {activeTab === 'forwarding' && (
-          <div className="animate-fade-in">
-            {/* Add Forwarding Rule */}
-            <form onSubmit={handleAddRule} className="card">
-              <div className="card-title" style={{ marginBottom: '12px' }}>
-                Добавить клиентский проброс порта
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
-                <div className="input-group">
-                  <label>Название правила</label>
-                  <input
-                    className="input"
-                    placeholder="Напр. Minecraft Server"
-                    value={newRule.name}
-                    onChange={e => setNewRule({ ...newRule, name: e.target.value })}
-                  />
-                </div>
-                <div className="input-group">
-                  <label>Локальный порт (на вашем ПК)</label>
-                  <input
-                    className="input"
-                    placeholder="25565"
-                    type="number"
-                    value={newRule.localPort}
-                    onChange={e => setNewRule({ ...newRule, localPort: e.target.value })}
-                  />
-                </div>
-              </div>
-
-              <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', gap: '10px' }}>
-                <div className="input-group">
-                  <label>IP или домен пира (напр. alex.vkturn)</label>
-                  <input
-                    className="input"
-                    placeholder="10.42.18.6 или mygame.vkturn"
-                    value={newRule.remoteIp}
-                    onChange={e => setNewRule({ ...newRule, remoteIp: e.target.value })}
-                  />
-                </div>
-                <div className="input-group">
-                  <label>Порт пира</label>
-                  <input
-                    className="input"
-                    placeholder="25565"
-                    type="number"
-                    value={newRule.remotePort}
-                    onChange={e => setNewRule({ ...newRule, remotePort: e.target.value })}
-                  />
-                </div>
-                <div className="input-group">
-                  <label>Протокол</label>
-                  <select
-                    className="input"
-                    value={newRule.protocol}
-                    onChange={e => setNewRule({ ...newRule, protocol: e.target.value })}
-                  >
-                    <option value="TCP">TCP</option>
-                    <option value="UDP">UDP</option>
-                  </select>
-                </div>
-              </div>
-
-              <button type="submit" className="btn btn-secondary" style={{ width: '100%', marginTop: '6px' }}>
-                + Активировать проброс
-              </button>
-            </form>
-
-            {/* Rules List */}
-            <div className="card">
-              <div className="card-header">
-                <span className="card-title">Активные пробросы</span>
-              </div>
-              {forwardRules.length === 0 ? (
-                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', textAlign: 'center', padding: '12px 0' }}>
-                  Нет активных правил. Добавьте порт выше для подключения к серверам друзей.
-                </p>
-              ) : (
-                forwardRules.map(r => (
-                  <div key={r.id} className="peer-row">
-                    <div>
-                      <strong>{r.name}</strong>
-                      <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
-                        127.0.0.1:{r.localPort} ➔ {r.remoteIp}:{r.remotePort} ({r.protocol})
-                      </div>
-                    </div>
-                    <button
-                      className="btn btn-danger btn-sm"
-                      onClick={() => handleRemoveRule(r.id)}
-                    >
-                      Удалить
-                    </button>
-                  </div>
-                ))
-              )}
-            </div>
           </div>
         )}
 
@@ -825,7 +636,7 @@ export function App() {
                 </form>
 
                 <div className="card-title" style={{ marginBottom: '8px' }}>
-                  Открытые сервисы на вашем ПК:
+                  Открытые сервисы на вашем ПК (будут доступны друзьям):
                 </div>
                 {allowedPorts.length === 0 ? (
                   <p style={{ color: 'var(--text-muted)', fontSize: '0.82rem' }}>
@@ -849,29 +660,6 @@ export function App() {
                 )}
               </div>
             )}
-          </div>
-        )}
-
-        {activeTab === 'obfuscation' && (
-          <div className="animate-fade-in card">
-            <div className="card-title" style={{ marginBottom: '14px' }}>
-              Параметры маскировки трафика (DPI Bypass)
-            </div>
-            <div style={{ fontSize: '0.85rem', lineHeight: '1.6', color: 'var(--text-muted)' }}>
-              <p style={{ marginBottom: '10px' }}>
-                <strong style={{ color: 'var(--text-main)' }}>Профиль: </strong>
-                <span className="badge obf">rtpopus3 (WebRTC Voice Emulation)</span>
-              </p>
-              <p style={{ marginBottom: '10px' }}>
-                Трафик оверлейной сети упаковывается в заголовки <strong>RTP Opus (PT 111)</strong> с расширениями <strong>RFC 8285</strong> (audio-level + transport-cc) и шифруется алгоритмом <strong>ChaCha20-Poly1305</strong>.
-              </p>
-              <div style={{ marginTop: '14px', padding: '12px', background: 'rgba(0,0,0,0.25)', borderRadius: '8px' }}>
-                <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>Ключ симметричного шифрования (AEAD):</div>
-                <div style={{ fontFamily: 'monospace', fontSize: '0.78rem', color: '#60a5fa', wordBreak: 'break-all', marginTop: '4px' }}>
-                  {obfKey || 'Ключ не задан'}
-                </div>
-              </div>
-            </div>
           </div>
         )}
       </div>

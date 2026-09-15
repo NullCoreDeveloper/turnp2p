@@ -28,6 +28,7 @@ type ConnectionStatus struct {
 	NodeName     string   `json:"nodeName"`
 	RelayAddr    string   `json:"relayAddr"`
 	ObfProfile   string   `json:"obfProfile"`
+	ObfKey       string   `json:"obfKey"`
 	Link         string   `json:"link"`
 	FirewallMode string   `json:"firewallMode"`
 	SharedPorts  []int    `json:"sharedPorts"`
@@ -185,6 +186,11 @@ func (a *App) JoinNetwork(vkLink string, nickname string, customDomain string, o
 		}
 		_ = a.hostsMgr.Sync(hostsMap)
 
+		// In Userspace mode, automatically forward open ports of discovered peers in background
+		if a.networkMode != "tun" {
+			a.autoSyncProxyRules(peers)
+		}
+
 		if a.ctx != nil {
 			wailsRuntime.EventsEmit(a.ctx, "peers_updated", peers)
 		}
@@ -235,6 +241,7 @@ func (a *App) JoinNetwork(vkLink string, nickname string, customDomain string, o
 		NodeName:     name,
 		RelayAddr:    relayAddrStr,
 		ObfProfile:   "rtpopus3",
+		ObfKey:       obfKey,
 		Link:         vkLink,
 		FirewallMode: mode,
 		SharedPorts:  ports,
@@ -385,4 +392,31 @@ func (a *App) RemoveForwardRule(id string) error {
 // GetForwardRules returns all active port forward rules.
 func (a *App) GetForwardRules() []proxy.ForwardingRule {
 	return a.proxyMgr.ListRules()
+}
+
+func (a *App) autoSyncProxyRules(peers []p2p.Peer) {
+	currentRules := a.proxyMgr.ListRules()
+	existingRuleMap := make(map[string]bool)
+	for _, r := range currentRules {
+		existingRuleMap[fmt.Sprintf("%s:%d", r.RemoteIP, r.RemotePort)] = true
+	}
+
+	for _, p := range peers {
+		targetAddr := p.Domain
+		if targetAddr == "" {
+			targetAddr = p.VirtualIP
+		}
+		for _, port := range p.SharedPorts {
+			key := fmt.Sprintf("%s:%d", targetAddr, port)
+			if !existingRuleMap[key] {
+				_ = a.proxyMgr.AddRule(proxy.ForwardingRule{
+					Name:       fmt.Sprintf("%s :%d", p.Name, port),
+					Protocol:   "TCP",
+					LocalPort:  port,
+					RemoteIP:   targetAddr,
+					RemotePort: port,
+				})
+			}
+		}
+	}
 }
