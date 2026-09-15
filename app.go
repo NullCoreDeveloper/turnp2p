@@ -210,6 +210,7 @@ func (a *App) JoinNetwork(vkLink string, nickname string, customDomain string, o
 	if addr := bondedPacketConn.LocalAddr(); addr != nil {
 		relayAddrStr = addr.String()
 	}
+	mode, ports := node.GetFirewallConfig()
 
 	// 4. Start automatic signaling exchange via VK Call WebSocket if available
 	if creds.WsEndpoint != "" {
@@ -250,7 +251,6 @@ func (a *App) JoinNetwork(vkLink string, nickname string, customDomain string, o
 		}
 	}
 
-	mode, ports := node.GetFirewallConfig()
 	initialActive := bondedPacketConn.ActiveCount()
 
 	a.status = ConnectionStatus{
