@@ -53,12 +53,18 @@ declare global {
 
 export function App() {
   const [activeTab, setActiveTab] = useState<'network' | 'firewall'>('network');
-  const [vkLink, setVkLink] = useState('');
-  const [nickname, setNickname] = useState('');
-  const [customDomain, setCustomDomain] = useState('');
-  const [obfKey, setObfKey] = useState('');
-  const [streamsCount, setStreamsCount] = useState<number>(10);
-  const [networkMode, setNetworkMode] = useState<'userspace' | 'tun'>('userspace');
+  const [vkLink, setVkLink] = useState(() => localStorage.getItem('turnp2p_vkLink') || '');
+  const [nickname, setNickname] = useState(() => localStorage.getItem('turnp2p_nickname') || '');
+  const [customDomain, setCustomDomain] = useState(() => localStorage.getItem('turnp2p_customDomain') || '');
+  const [obfKey, setObfKey] = useState(() => localStorage.getItem('turnp2p_obfKey') || '');
+  const [streamsCount, setStreamsCount] = useState<number>(() => {
+    const saved = localStorage.getItem('turnp2p_streamsCount');
+    return saved ? parseInt(saved, 10) || 10 : 10;
+  });
+  const [networkMode, setNetworkMode] = useState<'userspace' | 'tun'>(() => {
+    const saved = localStorage.getItem('turnp2p_networkMode');
+    return saved === 'tun' ? 'tun' : 'userspace';
+  });
   const [isConnected, setIsConnected] = useState(false);
   const [statusText, setStatusText] = useState('Отключено');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -83,12 +89,40 @@ export function App() {
   const [copiedText, setCopiedText] = useState<string | null>(null);
 
   // Firewall state
-  const [firewallMode, setFirewallMode] = useState<string>('whitelist');
-  const [allowedPorts, setAllowedPorts] = useState<number[]>([25565]);
+  const [firewallMode, setFirewallMode] = useState<string>(() => localStorage.getItem('turnp2p_firewallMode') || 'whitelist');
+  const [allowedPorts, setAllowedPorts] = useState<number[]>(() => {
+    try {
+      const saved = localStorage.getItem('turnp2p_allowedPorts');
+      return saved ? JSON.parse(saved) : [25565];
+    } catch {
+      return [25565];
+    }
+  });
   const [newAllowedPort, setNewAllowedPort] = useState('');
 
+  // Persist state changes
+  useEffect(() => { localStorage.setItem('turnp2p_vkLink', vkLink); }, [vkLink]);
+  useEffect(() => { localStorage.setItem('turnp2p_nickname', nickname); }, [nickname]);
+  useEffect(() => { localStorage.setItem('turnp2p_customDomain', customDomain); }, [customDomain]);
+  useEffect(() => { if (obfKey) localStorage.setItem('turnp2p_obfKey', obfKey); }, [obfKey]);
+  useEffect(() => { localStorage.setItem('turnp2p_streamsCount', String(streamsCount)); }, [streamsCount]);
+  useEffect(() => { localStorage.setItem('turnp2p_networkMode', networkMode); }, [networkMode]);
+  useEffect(() => { localStorage.setItem('turnp2p_firewallMode', firewallMode); }, [firewallMode]);
+  useEffect(() => { localStorage.setItem('turnp2p_allowedPorts', JSON.stringify(allowedPorts)); }, [allowedPorts]);
+
   useEffect(() => {
-    generateNewKey();
+    if (!obfKey) {
+      generateNewKey();
+    }
+
+    // Sync saved settings with backend
+    if (window.go?.main?.App) {
+      if (networkMode) window.go.main.App.SetNetworkMode(networkMode);
+      if (firewallMode) window.go.main.App.SetFirewallMode(firewallMode);
+      for (const p of allowedPorts) {
+        window.go.main.App.AllowInboundPort(p);
+      }
+    }
 
     if (window.runtime) {
       window.runtime.EventsOn('status_change', (status: ConnectionStatus) => {

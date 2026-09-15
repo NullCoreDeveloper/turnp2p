@@ -49,3 +49,7 @@ export function RemoveForwardRule(arg1) {
 export function SetFirewallMode(arg1) {
   return window['go']['main']['App']['SetFirewallMode'](arg1);
 }
+
+export function SetNetworkMode(arg1) {
+  return window['go']['main']['App']['SetNetworkMode'](arg1);
+}

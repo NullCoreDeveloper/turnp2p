@@ -27,3 +27,5 @@ export function LeaveNetwork():Promise<void>;
 export function RemoveForwardRule(arg1:string):Promise<void>;
 
 export function SetFirewallMode(arg1:string):Promise<void>;
+
+export function SetNetworkMode(arg1:string):Promise<void>;

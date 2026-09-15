@@ -8,10 +8,13 @@ export namespace main {
 	    nodeName: string;
 	    relayAddr: string;
 	    obfProfile: string;
+	    obfKey: string;
 	    link: string;
 	    firewallMode: string;
 	    sharedPorts: number[];
 	    streamsCount: number;
+	    networkMode: string;
+	    hostsSync: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new ConnectionStatus(source);
@@ -26,10 +29,13 @@ export namespace main {
 	        this.nodeName = source["nodeName"];
 	        this.relayAddr = source["relayAddr"];
 	        this.obfProfile = source["obfProfile"];
+	        this.obfKey = source["obfKey"];
 	        this.link = source["link"];
 	        this.firewallMode = source["firewallMode"];
 	        this.sharedPorts = source["sharedPorts"];
 	        this.streamsCount = source["streamsCount"];
+	        this.networkMode = source["networkMode"];
+	        this.hostsSync = source["hostsSync"];
 	    }
 	}
 

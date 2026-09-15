@@ -1,19 +1,97 @@
-# README
+# TurnP2P
 
-## About
+Инструмент для развертывания защищенной закрытой P2P/Mesh-оверлейной сети поверх публичной инфраструктуры TURN-серверов платформы VK.
 
-This is the official Wails React-TS template.
+<p align="center">
+  <img src="assets/screenshot.png" alt="Интерфейс TurnP2P" width="680" />
+</p>
 
-You can configure the project by editing `wails.json`. More information about the project settings can be found
-here: https://wails.io/docs/reference/project-config
+---
 
-## Live Development
+## Архитектура и принципы работы
 
-To run in live development mode, run `wails dev` in the project directory. This will run a Vite development
-server that will provide very fast hot reload of your frontend changes. If you want to develop in a browser
-and have access to your Go methods, there is also a dev server that runs on http://localhost:34115. Connect
-to this in your browser, and you can call your Go code from devtools.
+### 1. Транспортный уровень (VK TURN Relay)
+В качестве промежуточных relay-узлов для обхода NAT и фаерволов используются официальные TURN-серверы платформы VK:
+* Авторизация происходит через анонимные гостевые токены звонков (`https://vk.com/call/join/...`).
+* Полученные TURN-учетные данные кэшируются на 10 минут для минимизации лишних запросов к API.
+* При появлении защиты от ботов активируется фоновый SHA-256 Proof-of-Work майнер и автоматический обработчик капчи.
 
-## Building
+### 2. Маскировка трафика (`rtpopus3`)
+Для предотвращения блокировок со стороны ТСПУ и систем DPI оверлейный трафик мимикрирует под голосовые данные WebRTC:
+* Полезная нагрузка шифруется алгоритмом **ChaCha20-Poly1305** с общим симметричным ключом (256 бит).
+* Пакеты упаковываются в валидные заголовки **RTP (Payload Type 111, Opus Voice)**.
+* Формируются синтетические расширения заголовков по стандарту **RFC 8285** (One-Byte Header: `audio-level` и `transport-cc`).
 
-To build a redistributable, production mode package, use `wails build`.
+### 3. Многопоточный бондинг (Multi-Stream Pool)
+* Клиент открывает пул из $N$ параллельных TURN-сессий (по умолчанию 10).
+* Трафик распределяется по потокам (Round-Robin).
+* Фоновый поток-maintainer отслеживает состояние каждого соединения и при обрыве или 438 Stale Nonce выполняет повторное подключение с экспоненциальным backoff.
+
+### 4. Режимы сетевой интеграции
+
+* **Userspace + Hosts (без прав root / Administrator):**
+  * Трафик приложений перехватывается встроенным TCP-прокси на `127.0.0.1`.
+  * Доменные имена пиров (`*.vkturn`) автоматически синхронизируются в системный файл `hosts`.
+  * Открытые сервисы удаленных участников автоматически связываются с локальными портами.
+* **TUN L3 Network Adapter (`10.42.0.0/16`):**
+  * Создается виртуальный сетевой интерфейс (`turnp2p0` на Linux / Wintun на Windows).
+  * Прямая маршрутизация сырых IPv4-пакетов (TCP, UDP, ICMP Ping) без необходимости проксирования портов.
+
+### 5. Сетевой экран (L4 Firewall)
+* **Whitelist:** блокирует входящие соединения ко всем локальным портам, кроме явно указанных в списке разрешений.
+* **Block All:** полная изоляция входящего трафика.
+* **Allow All:** сквозной пропуск всех входящих запросов от участников оверлейной сети.
+
+---
+
+## Структура репозитория
+
+```
+turnp2p/
+├── app.go                 # Бэкенд-контроллер Wails и управление жизненным циклом
+├── main.go                # Инициализация оконного приложения
+├── core/
+│   ├── turn/              # Клиент TURN (pion/turn), аутентификация VK, PoW/Капча, пул потоков
+│   ├── obf/               # Маскировка rtpopus3 (RTP Opus + ChaCha20-Poly1305)
+│   ├── p2p/               # Mesh-протокол, Heartbeat, L4-файрвол, управление пирами
+│   ├── hosts/             # Менеджер атомарной синхронизации системного файла hosts
+│   ├── tun/               # Виртуальный сетевой адаптер (Linux TUN / Windows Wintun)
+│   └── proxy/             # Прозрачный локальный TCP-прокси
+└── frontend/              # Интерфейс Wails (React, TypeScript, Vite)
+```
+
+---
+
+## Сборка и запуск
+
+### Зависимости
+* **Go** 1.22+
+* **Node.js** 18+ и **npm**
+* **Wails CLI** (`go install github.com/wailsapp/wails/v2/cmd/wails@latest`)
+
+### Запуск в режиме разработки
+```bash
+wails dev
+```
+
+### Сборка исполняемого файла
+```bash
+wails build -clean
+```
+Результирующий бинарный файл создается в папке `build/bin/`.
+
+---
+
+## Использование
+
+1. Создайте звонок в интерфейсе VK и скопируйте ссылку подключения.
+2. Вставьте ссылку в поле «Ссылка на VK Звонок».
+3. При необходимости укажите собственный домен (опционально, например, `node1.vkturn`) и ключ шифрования (обязательно).
+4. Выберите режим работы (`Userspace` или `TUN`) и нажмите «Войти в P2P комнату».
+5. В разделе «Брандмауэр» откройте локальные порты, к которым разрешен доступ другим участникам (например, `25565` для игрового сервера).
+6. Другие участники сети, подключившись по той же ссылке, могут обращаться к вашим сервисам по домену `node1.vkturn:<порт>` или виртуальному IP.
+
+---
+
+## Лицензия
+GNU General Public License v3.0 (GPL-3.0) — подробности см. в файле [LICENSE](LICENSE).
