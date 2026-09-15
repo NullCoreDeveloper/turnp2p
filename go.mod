@@ -7,12 +7,13 @@ require (
 	github.com/bogdanfinn/tls-client v1.16.0
 	github.com/google/uuid v1.6.0
 	github.com/pion/turn/v4 v4.1.4
-	github.com/wailsapp/wails/v2 v2.11.0
+	github.com/wailsapp/wails/v2 v2.16.0
 	golang.org/x/crypto v0.53.0
 	golang.org/x/sys v0.46.0
 )
 
 require (
+	git.sr.ht/~jackmordaunt/go-toast/v2 v2.0.3 // indirect
 	github.com/andybalholm/brotli v1.2.0 // indirect
 	github.com/bdandy/go-errors v1.2.2 // indirect
 	github.com/bdandy/go-socks4 v1.2.3 // indirect

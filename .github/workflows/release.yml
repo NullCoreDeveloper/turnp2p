@@ -32,7 +32,7 @@ jobs:
       - name: Install Linux build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev pkg-config gcc file
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev pkg-config gcc file
 
       - name: Install Wails CLI
         run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
@@ -141,7 +141,7 @@ jobs:
 
       - name: Build Wails App with Embedded WebView2 & NSIS Installer
         run: |
-          wails build -platform windows/amd64 -webview2 embedded -nsis -clean -s
+          wails build -platform windows/amd64 -webview2 embed -nsis -clean -s
 
       - name: Package Windows Artifacts
         shell: pwsh
