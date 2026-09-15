@@ -227,6 +227,12 @@ func (a *App) JoinNetwork(vkLink string, nickname string, customDomain string, o
 		sig.Start(context.Background(), localInfo, func(peerRelayAddr string) {
 			log.Printf("[App] Discovered peer relay via signaling: %s, connecting...", peerRelayAddr)
 			_ = node.ConnectPeer(peerRelayAddr)
+		}, func(rawPacket []byte, fromRelay string) {
+			fakeAddr, _ := net.ResolveUDPAddr("udp", fromRelay)
+			bondedPacketConn.InjectPacket(rawPacket, fakeAddr)
+		})
+		bondedPacketConn.SetSignalingSender(func(data []byte, targetAddr string) {
+			sig.SendFrame(data, targetAddr)
 		})
 		a.sigClient = sig
 	}

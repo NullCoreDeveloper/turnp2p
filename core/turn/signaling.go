@@ -34,6 +34,7 @@ type SignalingClient struct {
 	conn       *websocket.Conn
 	mu         sync.Mutex
 	onPeerAddr func(relayAddr string)
+	onFrame    func(data []byte, fromRelay string)
 	localInfo  SignalingPeerInfo
 	ctx        context.Context
 	cancel     context.CancelFunc
@@ -52,10 +53,11 @@ func NewSignalingClient(wsEndpoint string, link string, obfKey string) *Signalin
 }
 
 // Start begins listening to the signaling channel and broadcasting local relay address.
-func (s *SignalingClient) Start(ctx context.Context, localInfo SignalingPeerInfo, onPeerAddr func(relayAddr string)) {
+func (s *SignalingClient) Start(ctx context.Context, localInfo SignalingPeerInfo, onPeerAddr func(relayAddr string), onFrame func(data []byte, fromRelay string)) {
 	s.mu.Lock()
 	s.localInfo = localInfo
 	s.onPeerAddr = onPeerAddr
+	s.onFrame = onFrame
 	s.ctx, s.cancel = context.WithCancel(ctx)
 	s.mu.Unlock()
 
@@ -188,22 +190,70 @@ func (s *SignalingClient) broadcastAnnounce() {
 	_ = conn.WriteMessage(websocket.TextMessage, raw)
 }
 
+// SendFrame transmits a data/mesh frame to peers via the WebSocket signaling transport.
+func (s *SignalingClient) SendFrame(data []byte, targetAddr string) {
+	s.mu.Lock()
+	conn := s.conn
+	info := s.localInfo
+	s.mu.Unlock()
+
+	if conn == nil {
+		return
+	}
+
+	msgObj := map[string]interface{}{
+		"type":   "turnp2p_frame",
+		"room":   s.roomHash,
+		"relay":  info.RelayAddr,
+		"target": targetAddr,
+		"data":   hex.EncodeToString(data),
+	}
+
+	raw, _ := json.Marshal(msgObj)
+	_ = conn.WriteMessage(websocket.TextMessage, raw)
+}
+
 func (s *SignalingClient) handleMessage(msg []byte) {
 	var obj map[string]interface{}
 	if err := json.Unmarshal(msg, &obj); err != nil {
 		return
 	}
 
-	// Check if this is a TurnP2P announce
-	if obj["type"] == "turnp2p_announce" && obj["room"] == s.roomHash {
-		relay, _ := obj["relay"].(string)
-		if relay != "" && relay != s.localInfo.RelayAddr {
+	// Verify room hash
+	if obj["room"] != s.roomHash {
+		return
+	}
+
+	relay, _ := obj["relay"].(string)
+	if relay == s.localInfo.RelayAddr {
+		return
+	}
+
+	msgType, _ := obj["type"].(string)
+
+	switch msgType {
+	case "turnp2p_announce":
+		if relay != "" {
 			s.mu.Lock()
 			cb := s.onPeerAddr
 			s.mu.Unlock()
 
 			if cb != nil {
 				cb(relay)
+			}
+		}
+	case "turnp2p_frame":
+		hexData, _ := obj["data"].(string)
+		if hexData != "" {
+			raw, err := hex.DecodeString(hexData)
+			if err == nil {
+				s.mu.Lock()
+				fCb := s.onFrame
+				s.mu.Unlock()
+
+				if fCb != nil {
+					fCb(raw, relay)
+				}
 			}
 		}
 	}

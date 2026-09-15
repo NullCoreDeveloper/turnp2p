@@ -8,55 +8,73 @@ import (
 	"turnp2p/core/p2p"
 )
 
-func TestLiveProbeTargetRelay(t *testing.T) {
+func TestLiveJoinAndDiscoverUser(t *testing.T) {
 	vkLink := "https://vk.com/call/join/VjlpELgebDr_IGvu8b--u4Qh3eW4t3yoKUqhjEJTlRU"
 	obfKey := "1fe6696c763a333fa5394c5778231dd1b08d3ac7e254d3ad4b156f9162216563"
-	targetRelay := "91.231.135.87:53350"
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	t.Logf("[Probe] Fetching VK credentials...")
+	t.Logf("[Live Bot] Fetching credentials for VK call: %s...", vkLink)
 	creds, err := FetchVKTurnCredentials(ctx, vkLink)
 	if err != nil {
-		t.Fatalf("Failed credentials: %v", err)
+		t.Fatalf("Failed to get credentials: %v", err)
 	}
 
-	t.Logf("[Probe] Connecting to TURN...")
-	client := NewClient()
-	conn, err := client.Connect(ctx, creds, obfKey)
+	t.Logf("[Live Bot] TURN Server: %s, Username: %s", creds.ServerAddr, creds.Username)
+	t.Logf("[Live Bot] WsEndpoint: %s", creds.WsEndpoint)
+
+	t.Logf("[Live Bot] Connecting 3 streams to TURN (rtpopus3)...")
+	bondedConn, err := AllocateMultiStreamClient(ctx, creds, obfKey, 3)
 	if err != nil {
-		t.Fatalf("Failed TURN connect: %v", err)
+		t.Fatalf("Failed multi-stream: %v", err)
 	}
-	defer client.Disconnect()
+	defer bondedConn.Close()
 
-	myRelay := conn.LocalAddr().String()
-	t.Logf("[Probe] Tester Relay: %s", myRelay)
+	relayAddrStr := bondedConn.LocalAddr().String()
+	t.Logf("[Live Bot] Bot Relay Address: %s", relayAddrStr)
 
-	node := p2p.NewMeshNode("ProbeTester", "probe.vkturn", "")
-	peerFound := make(chan p2p.Peer, 5)
+	node := p2p.NewMeshNode("AntigravityBot", "bot.vkturn", "")
+	peersDiscovered := make(chan p2p.Peer, 10)
 
 	node.SetPeerCallback(func(peers []p2p.Peer) {
 		for _, p := range peers {
-			t.Logf("[PEER FOUND!] Name=%s, IP=%s, Domain=%s, Ping=%dms, Ports=%v",
-				p.Name, p.VirtualIP, p.Domain, p.Ping, p.SharedPorts)
-			peerFound <- p
+			t.Logf("[PEER DETECTED!] Name=%s, Domain=%s, VirtualIP=%s, Relay=%s, Ping=%dms, SharedPorts=%v",
+				p.Name, p.Domain, p.VirtualIP, p.RelayAddr, p.Ping, p.SharedPorts)
+			peersDiscovered <- p
 		}
 	})
 
-	if err := node.Start(context.Background(), conn); err != nil {
+	if err := node.Start(context.Background(), bondedConn); err != nil {
 		t.Fatalf("Failed node start: %v", err)
 	}
 	defer node.Stop()
 
-	t.Logf("[Probe] Sending discovery probes to user relay: %s...", targetRelay)
-	_ = node.ConnectPeer(targetRelay)
+	// Start Signaling client if wsEndpoint present
+	if creds.WsEndpoint != "" {
+		sig := NewSignalingClient(creds.WsEndpoint, vkLink, obfKey)
+		id, name, vIP, domain := node.GetInfo()
+		localInfo := SignalingPeerInfo{
+			ID:        id,
+			Name:      name,
+			RelayAddr: relayAddrStr,
+			VirtualIP: vIP,
+			Domain:    domain,
+		}
+		sig.Start(context.Background(), localInfo, func(peerRelayAddr string) {
+			t.Logf("[Live Bot Signaling] Received peer relay from WebSocket: %s, connecting...", peerRelayAddr)
+			_ = node.ConnectPeer(peerRelayAddr)
+		})
+		defer sig.Stop()
+	}
 
+	t.Logf("[Live Bot] Listening in the room for 15 seconds...")
 	select {
-	case p := <-peerFound:
-		t.Logf("[SUCCESS!] Found your active client in the room: %s (%s, %s)", p.Name, p.Domain, p.VirtualIP)
-	case <-time.After(12 * time.Second):
-		t.Logf("[INFO] Probe complete. If your client is still on, check if relay %s is still allocated.", targetRelay)
+	case p := <-peersDiscovered:
+		t.Logf("[SUCCESS!] Successfully discovered user client in room: %s (%s, %s, ping=%dms)",
+			p.Name, p.Domain, p.VirtualIP, p.Ping)
+	case <-time.After(15 * time.Second):
+		t.Logf("[Live Bot INFO] Timeout 15s. Peers in table: %d", len(node.GetPeers()))
 	}
 }
 

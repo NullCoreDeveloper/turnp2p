@@ -32,6 +32,7 @@ type MultiStreamPacketConn struct {
 	mu            sync.RWMutex
 	wakeChan      chan struct{}
 	onCountChange func(active int, target int)
+	sigSender     func(data []byte, targetAddr string)
 	streamIDSeq   atomic.Int32
 }
 
@@ -268,11 +269,36 @@ func (m *MultiStreamPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 	return len(res.data), res.addr, nil
 }
 
+// InjectPacket delivers an incoming packet directly into the read channel from signaling/external transport.
+func (m *MultiStreamPacketConn) InjectPacket(data []byte, fromAddr net.Addr) {
+	if m.closed.Load() {
+		return
+	}
+	b := make([]byte, len(data))
+	copy(b, data)
+	select {
+	case m.readChan <- packetResult{data: b, addr: fromAddr}:
+	default:
+	}
+}
+
+// SetSignalingSender sets a callback to relay frames over the WebSocket channel.
+func (m *MultiStreamPacketConn) SetSignalingSender(sender func(data []byte, targetAddr string)) {
+	m.mu.Lock()
+	m.sigSender = sender
+	m.mu.Unlock()
+}
+
 func (m *MultiStreamPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	m.mu.RLock()
 	connsCount := len(m.streams)
+	sender := m.sigSender
 	if connsCount == 0 || m.closed.Load() {
 		m.mu.RUnlock()
+		if sender != nil && addr != nil {
+			sender(p, addr.String())
+			return len(p), nil
+		}
 		return 0, net.ErrClosed
 	}
 
@@ -281,7 +307,14 @@ func (m *MultiStreamPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	holder := m.streams[idx]
 	m.mu.RUnlock()
 
-	return holder.conn.WriteTo(p, addr)
+	n, err := holder.conn.WriteTo(p, addr)
+	// If TURN write fails (e.g. CreatePermission 400 when relaying to same TURN server IP),
+	// smoothly fallback and mirror via WebSocket signaling!
+	if (err != nil || n == 0) && sender != nil && addr != nil {
+		sender(p, addr.String())
+		return len(p), nil
+	}
+	return n, err
 }
 
 func (m *MultiStreamPacketConn) Close() error {
@@ -328,10 +361,10 @@ func (m *MultiStreamPacketConn) SetWriteDeadline(t time.Time) error { return nil
 // AllocateMultiStreamClient creates N parallel TURN allocations with rtpopus3 obfuscation and starts background replenishment.
 func AllocateMultiStreamClient(ctx context.Context, creds *Credentials, obfKey string, streamsCount int) (*MultiStreamPacketConn, error) {
 	if streamsCount <= 0 {
-		streamsCount = 10
+		streamsCount = 3
 	}
-	if streamsCount > 30 {
-		streamsCount = 30
+	if streamsCount > 20 {
+		streamsCount = 20
 	}
 
 	log.Printf("[TURN MultiStream] Initializing %d parallel TURN streams with rtpopus3...", streamsCount)
@@ -385,6 +418,8 @@ func AllocateMultiStreamClient(ctx context.Context, creds *Credentials, obfKey s
 				firstErr = e
 			}
 		}
+		// Clear credentials cache on allocation failure so next attempt gets fresh token
+		InvalidateCredentialsCache(creds.Link)
 		return nil, fmt.Errorf("failed to allocate any TURN streams: %w", firstErr)
 	}
 

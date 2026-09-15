@@ -291,3 +291,13 @@ func FetchVKTurnCredentials(ctx context.Context, link string) (*Credentials, err
 
 	return nil, fmt.Errorf("не удалось получить TURN данные: %w", lastErr)
 }
+
+// InvalidateCredentialsCache removes cached credentials for a link.
+func InvalidateCredentialsCache(link string) {
+	clean := strings.TrimPrefix(link, "https://vk.com/call/join/")
+	clean = strings.TrimPrefix(clean, "https://vk.ru/call/join/")
+	clean = strings.TrimSpace(clean)
+	credsCacheMu.Lock()
+	delete(credsCache, clean)
+	credsCacheMu.Unlock()
+}
