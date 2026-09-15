@@ -8,6 +8,8 @@ export function AddForwardRule(arg1:proxy.ForwardingRule):Promise<void>;
 
 export function AllowInboundPort(arg1:number):Promise<void>;
 
+export function ConnectPeer(arg1:string):Promise<void>;
+
 export function DisallowInboundPort(arg1:number):Promise<void>;
 
 export function GenerateRandomKey():Promise<string>;

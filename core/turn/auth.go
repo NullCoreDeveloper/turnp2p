@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	neturl "net/url"
 	"strings"
+	"sync"
 	"time"
 
 	fhttp "github.com/bogdanfinn/fhttp"
@@ -33,12 +34,29 @@ func vkDelay(minMs, maxMs int) {
 	time.Sleep(time.Duration(ms) * time.Millisecond)
 }
 
+var (
+	credsCacheMu sync.RWMutex
+	credsCache   = make(map[string]*Credentials)
+)
+
 // FetchVKTurnCredentials iterates over official VK App credentials and browser profiles to obtain TURN relay creds.
+// Caches valid credentials for 10 minutes to avoid redundant captcha solving and API rate limits.
 func FetchVKTurnCredentials(ctx context.Context, link string) (*Credentials, error) {
 	cleanLink := CleanVKLink(link)
 	if cleanLink == "" {
 		return nil, fmt.Errorf("некорректная ссылка на VK звонок: %s", link)
 	}
+
+	// 1. Check in-memory cache
+	credsCacheMu.RLock()
+	if cached, exists := credsCache[cleanLink]; exists {
+		if time.Now().Before(cached.ExpiresAt) {
+			credsCacheMu.RUnlock()
+			log.Printf("[VK Auth] Using cached credentials for %s (expires in %v)", cleanLink, time.Until(cached.ExpiresAt).Truncate(time.Second))
+			return cached, nil
+		}
+	}
+	credsCacheMu.RUnlock()
 
 	var lastErr error
 
@@ -253,13 +271,19 @@ func FetchVKTurnCredentials(ctx context.Context, link string) (*Credentials, err
 
 		log.Printf("[VK Auth] Successfully extracted TURN server: %s with user: %s (via %s)", address, user, creds.Name)
 
-		return &Credentials{
+		result := &Credentials{
 			Username:   user,
 			Password:   pass,
 			ServerAddr: address,
-			ExpiresAt:  time.Now().Add(24 * time.Hour),
+			ExpiresAt:  time.Now().Add(10 * time.Minute),
 			Link:       cleanLink,
-		}, nil
+		}
+
+		credsCacheMu.Lock()
+		credsCache[cleanLink] = result
+		credsCacheMu.Unlock()
+
+		return result, nil
 	}
 
 	return nil, fmt.Errorf("не удалось получить TURN данные: %w", lastErr)

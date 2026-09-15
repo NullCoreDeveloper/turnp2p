@@ -61,6 +61,7 @@ type mockPacketConn struct {
 }
 
 func (m *mockPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
+	time.Sleep(200 * time.Millisecond)
 	return 0, m.addr, nil
 }
 

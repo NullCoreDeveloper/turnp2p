@@ -10,6 +10,10 @@ export function AllowInboundPort(arg1) {
   return window['go']['main']['App']['AllowInboundPort'](arg1);
 }
 
+export function ConnectPeer(arg1) {
+  return window['go']['main']['App']['ConnectPeer'](arg1);
+}
+
 export function DisallowInboundPort(arg1) {
   return window['go']['main']['App']['DisallowInboundPort'](arg1);
 }
