@@ -8,49 +8,59 @@ import (
 	"turnp2p/core/p2p"
 )
 
-func TestLiveP2PDiscoveryProbe(t *testing.T) {
+func TestLiveProbeTargetRelay(t *testing.T) {
 	vkLink := "https://vk.com/call/join/VjlpELgebDr_IGvu8b--u4Qh3eW4t3yoKUqhjEJTlRU"
 	obfKey := "1fe6696c763a333fa5394c5778231dd1b08d3ac7e254d3ad4b156f9162216563"
+	targetRelay := "91.231.135.87:53350"
 
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	t.Logf("[Diag] Fetching VK credentials...")
+	t.Logf("[Probe] Fetching VK credentials...")
 	creds, err := FetchVKTurnCredentials(ctx, vkLink)
 	if err != nil {
-		t.Fatalf("Failed to get credentials: %v", err)
+		t.Fatalf("Failed credentials: %v", err)
 	}
-	t.Logf("[Diag] TURN Credentials: %+v", creds)
 
-	t.Logf("[Diag] Allocating bonded connection (5 streams, rtpopus3)...")
-	conn, err := AllocateMultiStreamClient(ctx, creds, obfKey, 5)
+	t.Logf("[Probe] Connecting to TURN...")
+	client := NewClient()
+	conn, err := client.Connect(ctx, creds, obfKey)
 	if err != nil {
-		t.Fatalf("Failed to allocate multi-stream: %v", err)
+		t.Fatalf("Failed TURN connect: %v", err)
 	}
-	defer conn.Close()
+	defer client.Disconnect()
 
-	node := p2p.NewMeshNode("DiagBot", "diagbot.vkturn", "")
-	peersFound := make(chan p2p.Peer, 10)
+	myRelay := conn.LocalAddr().String()
+	t.Logf("[Probe] Tester Relay: %s", myRelay)
+
+	node := p2p.NewMeshNode("ProbeTester", "probe.vkturn", "")
+	peerFound := make(chan p2p.Peer, 5)
 
 	node.SetPeerCallback(func(peers []p2p.Peer) {
 		for _, p := range peers {
-			t.Logf("[Diag EVENT] Discovered active peer: Name=%s, Domain=%s, IP=%s, Ports=%v, Ping=%dms",
-				p.Name, p.Domain, p.VirtualIP, p.SharedPorts, p.Ping)
-			peersFound <- p
+			t.Logf("[PEER FOUND!] Name=%s, IP=%s, Domain=%s, Ping=%dms, Ports=%v",
+				p.Name, p.VirtualIP, p.Domain, p.Ping, p.SharedPorts)
+			peerFound <- p
 		}
 	})
 
 	if err := node.Start(context.Background(), conn); err != nil {
-		t.Fatalf("Failed to start mesh node: %v", err)
+		t.Fatalf("Failed node start: %v", err)
 	}
 	defer node.Stop()
 
-	t.Logf("[Diag] Node started. Local relay: %s. Listening for active peers for 10 seconds...", conn.LocalAddr())
+	t.Logf("[Probe] Sending discovery probes to user relay: %s...", targetRelay)
+	_ = node.ConnectPeer(targetRelay)
 
 	select {
-	case p := <-peersFound:
-		t.Logf("[Diag SUCCESS] Peer detected! %s (%s, %s)", p.Name, p.Domain, p.VirtualIP)
-	case <-time.After(10 * time.Second):
-		t.Logf("[Diag INFO] 10s listen period elapsed. Active peers count: %d", len(node.GetPeers()))
+	case p := <-peerFound:
+		t.Logf("[SUCCESS!] Found your active client in the room: %s (%s, %s)", p.Name, p.Domain, p.VirtualIP)
+	case <-time.After(12 * time.Second):
+		t.Logf("[INFO] Probe complete. If your client is still on, check if relay %s is still allocated.", targetRelay)
 	}
+}
+
+func creds2Client(c *Credentials) *Credentials {
+	cp := *c
+	return &cp
 }

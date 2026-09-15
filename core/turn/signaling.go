@@ -5,8 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -86,13 +88,23 @@ func (s *SignalingClient) runLoop() {
 			continue
 		}
 
+		wsURL := s.wsEndpoint
+		devID := fmt.Sprintf("turnp2p-%x", s.roomHash)
+		if !strings.Contains(wsURL, "appVersion=") {
+			sep := "?"
+			if strings.Contains(wsURL, "?") {
+				sep = "&"
+			}
+			wsURL = fmt.Sprintf("%s%sappVersion=1.1&client_type=SDK_JS&device_idx=0&device=%s&device_id=%s&version=2", wsURL, sep, devID, devID)
+		}
+
 		dialer := websocket.DefaultDialer
 		dialer.HandshakeTimeout = 5 * time.Second
 		headers := http.Header{}
 		headers.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
 		headers.Set("Origin", "https://vk.ru")
 
-		conn, _, err := dialer.DialContext(s.ctx, s.wsEndpoint, headers)
+		conn, _, err := dialer.DialContext(s.ctx, wsURL, headers)
 		if err != nil {
 			log.Printf("[Signaling] WebSocket connect error: %v, retrying in 3s...", err)
 			select {

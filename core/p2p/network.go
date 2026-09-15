@@ -425,18 +425,39 @@ func (n *MeshNode) PingAddress(addr net.Addr) error {
 	}
 
 	frame := append([]byte{FrameHeartbeat}, data...)
-	_, err = n.packetConn.WriteTo(frame, addr)
-	return err
+	var lastErr error
+	for i := 0; i < 2; i++ {
+		_, lastErr = n.packetConn.WriteTo(frame, addr)
+		if i == 0 {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	return lastErr
 }
 
-// ConnectPeer resolves a remote address string and sends a discovery ping.
+// ConnectPeer resolves a remote address string and sends continuous discovery pings.
 func (n *MeshNode) ConnectPeer(addrStr string) error {
 	addrStr = strings.TrimSpace(addrStr)
 	udpAddr, err := net.ResolveUDPAddr("udp", addrStr)
 	if err != nil {
 		return fmt.Errorf("invalid peer address: %w", err)
 	}
-	return n.PingAddress(udpAddr)
+
+	// Send an initial ping immediately
+	err = n.PingAddress(udpAddr)
+
+	// Send periodic burst in background for 5 seconds to punch through stateful TURN allocations
+	go func() {
+		for i := 0; i < 8; i++ {
+			time.Sleep(400 * time.Millisecond)
+			if !n.running.Load() {
+				return
+			}
+			_ = n.PingAddress(udpAddr)
+		}
+	}()
+
+	return err
 }
 
 // heartbeatLoop sends periodic discovery announcements to known peers.
