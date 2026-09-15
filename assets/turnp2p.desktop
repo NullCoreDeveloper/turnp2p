@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=TurnP2P
+Comment=Virtual P2P Mesh Network over VK TURN
+Exec=turnp2p
+Icon=turnp2p
+Terminal=false
+Type=Application
+Categories=Network;P2P;Utility;
+Keywords=P2P;Mesh;VPN;VK;TURN;LAN;
