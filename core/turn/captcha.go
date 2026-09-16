@@ -537,7 +537,7 @@ func SolveCaptchaViaBrowser(ctx context.Context, redirectURI string) (string, er
 	mux.HandleFunc("/generic_proxy", func(w http.ResponseWriter, r *http.Request) {
 		targetAuthURL := r.URL.Query().Get("proxy_url")
 		targetParsed, err := neturl.Parse(targetAuthURL)
-		if err != nil || targetParsed.Host == "" {
+		if err != nil || targetParsed.Host == "" || targetParsed.Hostname() == "0.0.0.0" {
 			http.Error(w, "Bad URL", http.StatusBadRequest)
 			return
 		}

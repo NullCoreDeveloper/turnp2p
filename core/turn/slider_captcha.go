@@ -44,6 +44,30 @@ type captchaNotRobotSession struct {
 	client       tlsclient.HttpClient
 	profile      Profile
 	browserFp    string
+	debugInfo    string
+}
+
+var reCaptchaDebugInfo = regexp.MustCompile(`[A-Za-z_$][\w$]*:\s*"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"`)
+
+var chromeHeaderOrder = []string{
+	"content-length",
+	"sec-ch-ua-platform",
+	"user-agent",
+	"sec-ch-ua",
+	"content-type",
+	"sec-ch-ua-mobile",
+	"upgrade-insecure-requests",
+	"accept",
+	"origin",
+	"sec-fetch-site",
+	"sec-fetch-mode",
+	"sec-fetch-user",
+	"sec-fetch-dest",
+	"referer",
+	"accept-encoding",
+	"accept-language",
+	"cookie",
+	"priority",
 }
 
 func applyBrowserProfileFhttp(req *fhttp.Request, profile Profile) {
@@ -56,7 +80,12 @@ func applyBrowserProfileFhttp(req *fhttp.Request, profile Profile) {
 	} else {
 		req.Header.Set("Accept-Language", "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7")
 	}
-	req.Header.Set("DNT", "1")
+	if req.Header.Get("Sec-Fetch-Dest") == "document" {
+		req.Header.Set("Priority", "u=0, i")
+	} else {
+		req.Header.Set("Priority", "u=1, i")
+	}
+	req.Header[fhttp.HeaderOrderKey] = chromeHeaderOrder
 }
 
 
@@ -88,6 +117,7 @@ type captchaBootstrap struct {
 	PowInput   string
 	Difficulty int
 	Settings   *captchaSettingsResponse
+	DebugInfo  string
 }
 
 // AutoSolveVkCaptcha automatically solves VK Checkbox/Slider captchas in the background.
@@ -99,7 +129,7 @@ func AutoSolveVkCaptcha(ctx context.Context, redirectURI string, sessionToken st
 		return "", fmt.Errorf("failed to fetch captcha bootstrap: %w", err)
 	}
 
-	log.Printf("[Auto Captcha] PoW input: %s, difficulty: %d", bootstrap.PowInput, bootstrap.Difficulty)
+	log.Printf("[Auto Captcha] PoW input: %s, difficulty: %d, debugInfo: %s", bootstrap.PowInput, bootstrap.Difficulty, bootstrap.DebugInfo)
 	hash := solvePoW(bootstrap.PowInput, bootstrap.Difficulty)
 	if hash == "" {
 		return "", fmt.Errorf("failed to solve PoW")
@@ -107,7 +137,7 @@ func AutoSolveVkCaptcha(ctx context.Context, redirectURI string, sessionToken st
 
 	log.Printf("[Auto Captcha] PoW solved: hash=%s", hash)
 
-	session := newCaptchaNotRobotSession(ctx, sessionToken, hash, redirectURI, client, profile)
+	session := newCaptchaNotRobotSession(ctx, sessionToken, hash, redirectURI, client, profile, bootstrap.DebugInfo)
 
 	// Attempt 1: Standard Checkbox Auto-Solve (human-like checkbox check)
 	log.Printf("[Auto Captcha] Attempt 1/2: Solving via standard checkbox flow...")
@@ -198,6 +228,11 @@ func parseCaptchaBootstrapHTML(html string, sessionToken string) (*captchaBootst
 		}
 	}
 
+	debugInfo := ""
+	if match := reCaptchaDebugInfo.FindStringSubmatch(html); len(match) >= 2 {
+		debugInfo = match[1]
+	}
+
 	settings, err := parseCaptchaSettingsFromHTML(html)
 	if err != nil || settings == nil {
 		settings = &captchaSettingsResponse{
@@ -210,6 +245,7 @@ func parseCaptchaBootstrapHTML(html string, sessionToken string) (*captchaBootst
 		PowInput:   powInput,
 		Difficulty: difficulty,
 		Settings:   settings,
+		DebugInfo:  debugInfo,
 	}, nil
 }
 
@@ -383,6 +419,7 @@ func newCaptchaNotRobotSession(
 	redirectURI string,
 	client tlsclient.HttpClient,
 	profile Profile,
+	debugInfo string,
 ) *captchaNotRobotSession {
 	apiHost := "api.vk.ru"
 	originHost := "https://id.vk.ru"
@@ -415,6 +452,7 @@ func newCaptchaNotRobotSession(
 		client:       client,
 		profile:      profile,
 		browserFp:    generateBrowserFp(profile),
+		debugInfo:    debugInfo,
 	}
 }
 
@@ -544,7 +582,7 @@ func (s *captchaNotRobotSession) requestComponentDone() error {
 }
 
 func (s *captchaNotRobotSession) requestCheckboxCheck() (*captchaCheckResult, error) {
-	return s.requestCheck(generateFakeCursor(), base64.StdEncoding.EncodeToString([]byte("{}")))
+	return s.requestCheck("[]", base64.StdEncoding.EncodeToString([]byte("{}")))
 }
 
 func (s *captchaNotRobotSession) requestSliderContent(sliderSettings string) (*sliderCaptchaContent, error) {
@@ -570,16 +608,14 @@ func (s *captchaNotRobotSession) requestSliderCheck(activeSteps []int, candidate
 }
 
 func (s *captchaNotRobotSession) requestCheck(cursor string, answer string) (*captchaCheckResult, error) {
-	if cursor == "" || cursor == "[]" {
-		cursor = generateFakeCursor()
+	if cursor == "" {
+		cursor = "[]"
 	}
 
-	debugInfoBytes := md5.Sum([]byte(s.profile.UserAgent + strconv.FormatInt(time.Now().UnixNano(), 10)))
-	debugInfo := hex.EncodeToString(debugInfoBytes[:])
-
-	rtts := []string{"45", "50", "48", "52", "49", "51", "47", "50"}
-	connectionRtt := "[" + strings.Join(rtts, ",") + "]"
-	connectionDownlink := "[9.8,9.5,9.7,10.1,9.4,9.6,9.8,9.5]"
+	debugInfo := s.debugInfo
+	if debugInfo == "" {
+		debugInfo = captchaDebugInfo
+	}
 
 	values := s.baseValues()
 	values.Set("accelerometer", "[]")
@@ -587,8 +623,8 @@ func (s *captchaNotRobotSession) requestCheck(cursor string, answer string) (*ca
 	values.Set("motion", "[]")
 	values.Set("cursor", cursor)
 	values.Set("taps", "[]")
-	values.Set("connectionRtt", connectionRtt)
-	values.Set("connectionDownlink", connectionDownlink)
+	values.Set("connectionRtt", "[]")
+	values.Set("connectionDownlink", "[10,10,10]")
 	values.Set("browser_fp", s.browserFp)
 	values.Set("hash", s.hash)
 	values.Set("answer", answer)

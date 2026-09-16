@@ -91,15 +91,11 @@ func FetchVKTurnCredentials(ctx context.Context, link string) (*Credentials, err
 			}
 
 			req.Host = parsedURL.Hostname()
-			req.Header.Set("User-Agent", prof.UserAgent)
-			req.Header.Set("sec-ch-ua", prof.SecChUa)
-			req.Header.Set("sec-ch-ua-mobile", prof.SecChUaMobile)
-			req.Header.Set("sec-ch-ua-platform", prof.SecChUaPlatform)
-			req.Header.Set("Accept-Language", prof.AcceptLanguage)
+			applyBrowserProfileFhttp(req, prof)
 			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 			req.Header.Set("Accept", "*/*")
-			req.Header.Set("Origin", "https://vk.com")
-			req.Header.Set("Referer", "https://vk.com/")
+			req.Header.Set("Origin", "https://vk.ru")
+			req.Header.Set("Referer", "https://vk.ru/")
 			req.Header.Set("Sec-Fetch-Site", "same-site")
 			req.Header.Set("Sec-Fetch-Mode", "cors")
 			req.Header.Set("Sec-Fetch-Dest", "empty")
@@ -122,9 +118,15 @@ func FetchVKTurnCredentials(ctx context.Context, link string) (*Credentials, err
 			return resp, nil
 		}
 
-		// Step 1: Get Anonymous Token
-		data := fmt.Sprintf("client_id=%s&token_type=messages&client_secret=%s&version=1&app_id=%s",
-			creds.ClientID, creds.ClientSecret, creds.ClientID)
+		// Warm-up: open join page like a real browser before requesting anonymous tokens
+		if warmErr := openJoinPage(ctx, client, prof, cleanLink); warmErr != nil {
+			log.Printf("[VK Auth] Warm-up join page warning: %v", warmErr)
+		}
+		vkDelay(300, 600)
+
+		// Step 1: Get Anonymous Token with full scopes
+		data := fmt.Sprintf("client_secret=%s&client_id=%s&scopes=audio_anonymous,video_anonymous,photos_anonymous,profile_anonymous&isApiOauthAnonymEnabled=false&version=1&app_id=%s",
+			creds.ClientSecret, creds.ClientID, creds.ClientID)
 		resp1, err := doRequest(data, "https://login.vk.ru/?act=get_anonym_token")
 		if err != nil {
 			log.Printf("[VK Auth] get_anonym_token failed with %s: %v", creds.Name, err)
@@ -145,8 +147,7 @@ func FetchVKTurnCredentials(ctx context.Context, link string) (*Credentials, err
 
 		vkDelay(120, 200)
 
-		// VK calls API strictly requires https://vk.com/call/join/<hash> (rejects id.vk.com with error 9008)
-		fullJoinLink := fmt.Sprintf("https://vk.com/call/join/%s", cleanLink)
+		fullJoinLink := fmt.Sprintf("https://vk.ru/call/join/%s", cleanLink)
 
 		// Step 2: Call Preview
 		data = fmt.Sprintf("vk_join_link=%s&fields=photo_200&access_token=%s", fullJoinLink, token1)
@@ -178,8 +179,19 @@ func FetchVKTurnCredentials(ctx context.Context, link string) (*Credentials, err
 						solvedToken, solveErr = AutoSolveVkCaptcha(ctx, captchaChallenge.RedirectURI, captchaChallenge.SessionToken, client, prof)
 					}
 
-					// 2. If auto-solver failed or not applicable, open browser fallback
+					// 2. If auto-solver failed, check if token was burned
 					if solveErr != nil || solvedToken == "" {
+						errStr := ""
+						if solveErr != nil {
+							errStr = solveErr.Error()
+						}
+						// If server flagged session as BOT or reached limit, the session token is dead
+						if strings.Contains(errStr, "BOT") || strings.Contains(errStr, "ERROR_LIMIT") {
+							log.Printf("[VK Auth] Сервер VK отклонил капчу (%s). Сессия сожжена, ротируем приложение...", errStr)
+							lastErr = solveErr
+							break
+						}
+
 						log.Printf("[VK Auth] Авто-решение не удалось (%v). Запуск браузера для подтверждения...", solveErr)
 						solvedToken, solveErr = SolveCaptchaViaBrowser(ctx, captchaChallenge.RedirectURI)
 					}
@@ -324,4 +336,26 @@ func InvalidateCredentialsCache(link string) {
 	credsCacheMu.Lock()
 	delete(credsCache, clean)
 	credsCacheMu.Unlock()
+}
+
+func openJoinPage(ctx context.Context, httpClient tlsclient.HttpClient, prof Profile, link string) error {
+	req, err := fhttp.NewRequestWithContext(ctx, fhttp.MethodGet, "https://vk.ru/call/join/"+link, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+	req.Header.Set("Upgrade-Insecure-Requests", "1")
+	req.Header.Set("Sec-Fetch-Dest", "document")
+	req.Header.Set("Sec-Fetch-Mode", "navigate")
+	req.Header.Set("Sec-Fetch-User", "?1")
+	req.Header.Set("Sec-Fetch-Site", "none")
+	applyBrowserProfileFhttp(req, prof)
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return nil
 }
