@@ -329,6 +329,7 @@ func (s *SignalingClient) SendFrame(data []byte, targetAddr string) {
 			"data":            dataStr,
 		}
 		if raw, err := json.Marshal(transmitCmd); err == nil {
+			log.Printf("[Signaling] >>> SendFrame %d bytes to participant %d via WS", len(data), target.id)
 			_ = s.writeMsg(websocket.TextMessage, raw)
 		}
 	}
@@ -510,6 +511,7 @@ func (s *SignalingClient) handleTurnP2PData(obj map[string]interface{}) {
 		}
 	case "turnp2p_frame":
 		hexData, _ := obj["data"].(string)
+		log.Printf("[Signaling] <<< Received turnp2p_frame from relay %s (%d hex chars)", relay, len(hexData))
 		if hexData != "" {
 			raw, err := hex.DecodeString(hexData)
 			if err == nil {
@@ -517,8 +519,11 @@ func (s *SignalingClient) handleTurnP2PData(obj map[string]interface{}) {
 				fCb := s.onFrame
 				s.mu.Unlock()
 				if fCb != nil {
+					log.Printf("[Signaling] Injecting %d bytes from %s into packet conn", len(raw), relay)
 					fCb(raw, relay)
 				}
+			} else {
+				log.Printf("[Signaling] <<< turnp2p_frame hex decode error: %v", err)
 			}
 		}
 	}
