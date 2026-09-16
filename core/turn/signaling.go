@@ -230,7 +230,32 @@ func (s *SignalingClient) broadcastAnnounce() {
 		if err == nil {
 			_ = conn.WriteMessage(websocket.TextMessage, raw)
 		}
+
+		// Also try with stringified data payload
+		rawPayload, _ := json.Marshal(msgObj)
+		transmitCmdStr := map[string]interface{}{
+			"command":         "transmit-data",
+			"sequence":        s.nextSeq(),
+			"participantId":   target.id,
+			"participantType": "USER",
+			"data":            string(rawPayload),
+		}
+		if rawS, err := json.Marshal(transmitCmdStr); err == nil {
+			_ = conn.WriteMessage(websocket.TextMessage, rawS)
+		}
 	}
+
+	// Also send a broadcast transmit-data if supported by room
+	bcastCmd := map[string]interface{}{
+		"command":   "transmit-data",
+		"sequence":  s.nextSeq(),
+		"broadcast": true,
+		"data":      msgObj,
+	}
+	if rawB, err := json.Marshal(bcastCmd); err == nil {
+		_ = conn.WriteMessage(websocket.TextMessage, rawB)
+	}
+
 	if len(targets) > 0 {
 		log.Printf("[Signaling] >>> Broadcast announce to %d peers: relay=%s room=%s", len(targets), info.RelayAddr, s.roomHash)
 	}
@@ -298,13 +323,13 @@ func (s *SignalingClient) handleMessage(msg []byte) {
 	}
 
 	msgType, _ := obj["type"].(string)
+	notifType, _ := obj["notification"].(string)
 
 	// Check for ServerHello or conversation updates containing participants
 	if conv, ok := obj["conversation"].(map[string]interface{}); ok {
 		s.updateParticipantsFromConversation(conv)
 	}
 
-	notifType, _ := obj["notification"].(string)
 	if notifType == "participant-joined" {
 		if part, ok := obj["participant"].(map[string]interface{}); ok {
 			pid := parseParticipantID(part["id"])
@@ -330,7 +355,7 @@ func (s *SignalingClient) handleMessage(msg []byte) {
 				log.Printf("[Signaling] Peer left call: participantId=%d", pid)
 			}
 		}
-	} else if notifType == "transmitted-data" {
+	} else if notifType == "transmitted-data" || notifType == "data" {
 		// Data received from another peer via VK call signaling!
 		var dataMap map[string]interface{}
 		switch d := obj["data"].(type) {
@@ -346,15 +371,25 @@ func (s *SignalingClient) handleMessage(msg []byte) {
 		}
 	}
 
-	// Also handle legacy/direct message formats
+	// Also handle legacy/direct message formats or any custom data payload
 	if msgType == "turnp2p_announce" || msgType == "turnp2p_frame" {
 		s.handleTurnP2PData(obj)
 		return
 	}
 
-	if msgType != "notification" {
-		raw, _ := json.Marshal(obj)
-		log.Printf("[Signaling] <<< VK server msg type=%q: %s", msgType, truncate(string(raw), 400))
+	// Check if obj itself has data field with turnp2p message
+	if dMap, ok := obj["data"].(map[string]interface{}); ok {
+		if dt, _ := dMap["type"].(string); strings.HasPrefix(dt, "turnp2p_") {
+			s.handleTurnP2PData(dMap)
+			return
+		}
+	}
+
+	raw, _ := json.Marshal(obj)
+	if notifType != "" {
+		log.Printf("[Signaling] <<< VK notification=%q: %s", notifType, truncate(string(raw), 400))
+	} else if msgType != "response" {
+		log.Printf("[Signaling] <<< VK msg type=%q: %s", msgType, truncate(string(raw), 400))
 	}
 }
 
