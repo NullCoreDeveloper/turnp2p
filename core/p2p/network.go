@@ -110,6 +110,16 @@ func SanitizeDomain(input string) string {
 	return cleaned
 }
 
+// ToLoopbackIP converts a mesh virtual IP (e.g. 10.42.X.Y) into a unique local loopback IP (127.0.X.Y).
+// This prevents port collisions between different peers in Userspace mode.
+func ToLoopbackIP(virtualIP string) string {
+	parts := strings.Split(strings.TrimSpace(virtualIP), ".")
+	if len(parts) == 4 {
+		return fmt.Sprintf("127.0.%s.%s", parts[2], parts[3])
+	}
+	return "127.0.0.1"
+}
+
 // NewMeshNode creates a new P2P mesh node with an assigned virtual IP, custom domain, and default secure firewall.
 func NewMeshNode(name string, customDomain string, virtualIP string) *MeshNode {
 	if name == "" {

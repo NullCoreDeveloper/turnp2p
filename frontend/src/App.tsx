@@ -666,17 +666,21 @@ export function App() {
                           {p.sharedPorts && p.sharedPorts.length > 0 && (
                             <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '4px', flexWrap: 'wrap' }}>
                               <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Открытые сервисы:</span>
-                              {p.sharedPorts.map(port => (
-                                <span
-                                  key={port}
-                                  className="badge"
-                                  style={{ padding: '2px 6px', fontSize: '0.72rem', background: 'rgba(52, 211, 153, 0.15)', color: '#34d399', border: '1px solid rgba(52, 211, 153, 0.3)', cursor: 'pointer' }}
-                                  onClick={() => copyToClipboard(`${p.domain}:${port}`, `${p.domain}:${port}`)}
-                                  title={`Кликните чтобы скопировать адрес ${p.domain}:${port} для игры`}
-                                >
-                                  :{port} (Готов)
-                                </span>
-                              ))}
+                              {p.sharedPorts.map(port => {
+                                const loopIP = `127.0.${p.virtualIp.split('.')[2] || '0'}.${p.virtualIp.split('.')[3] || '1'}`;
+                                const targetAddr = p.domain ? `${p.domain}:${port}` : `${loopIP}:${port}`;
+                                return (
+                                  <span
+                                    key={port}
+                                    className="badge"
+                                    style={{ padding: '2px 6px', fontSize: '0.72rem', background: 'rgba(52, 211, 153, 0.15)', color: '#34d399', border: '1px solid rgba(52, 211, 153, 0.3)', cursor: 'pointer' }}
+                                    onClick={() => copyToClipboard(targetAddr, targetAddr)}
+                                    title={`Кликните чтобы скопировать адрес ${targetAddr} (${loopIP}:${port})`}
+                                  >
+                                    :{port} (Готов)
+                                  </span>
+                                );
+                              })}
                             </div>
                           )}
                         </div>
@@ -684,10 +688,15 @@ export function App() {
                           <span
                             className="badge"
                             style={{ cursor: 'pointer' }}
-                            onClick={() => copyToClipboard(p.virtualIp, `IP ${p.virtualIp}`)}
-                            title="Копировать IP"
+                            onClick={() => {
+                              const ipToCopy = networkMode === 'userspace' && p.virtualIp
+                                ? `127.0.${p.virtualIp.split('.')[2] || '0'}.${p.virtualIp.split('.')[3] || '1'}`
+                                : p.virtualIp;
+                              copyToClipboard(ipToCopy, `IP ${ipToCopy}`);
+                            }}
+                            title={networkMode === 'userspace' && p.virtualIp ? `Копировать локальный loopback (127.0.${p.virtualIp.split('.')[2] || '0'}.${p.virtualIp.split('.')[3] || '1'})` : 'Копировать IP'}
                           >
-                            {p.virtualIp}
+                            {networkMode === 'userspace' && p.virtualIp ? `127.0.${p.virtualIp.split('.')[2] || '0'}.${p.virtualIp.split('.')[3] || '1'}` : p.virtualIp}
                           </span>
                           <span className="badge ping">{p.ping} ms</span>
                         </div>

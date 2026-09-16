@@ -35,9 +35,40 @@ func OpenDevice(name string, virtualIP string) (Device, error) {
 		name = "turnp2p0"
 	}
 
+	dev, err := tryOpenTun(name, virtualIP)
+	if err == nil {
+		return dev, nil
+	}
+
+	// If failed and not running as root, attempt automatic elevation via pkexec
+	if os.Geteuid() != 0 {
+		currentUser := os.Getenv("USER")
+		if currentUser == "" {
+			currentUser = "root"
+		}
+
+		// Create persistent TUN device owned by current user and configure IP and routing
+		script := fmt.Sprintf(`ip tuntap add dev %[1]s mode tun user %[2]s 2>/dev/null || true
+ip addr add %[3]s/16 dev %[1]s 2>/dev/null || true
+ip link set dev %[1]s up
+ip route add 10.42.0.0/16 dev %[1]s 2>/dev/null || true`, name, currentUser, virtualIP)
+
+		cmd := exec.Command("pkexec", "sh", "-c", script)
+		if elevErr := cmd.Run(); elevErr != nil {
+			return nil, fmt.Errorf("failed to configure TUN interface via pkexec: %w (original error: %v)", elevErr, err)
+		}
+
+		// Retry opening the now-configured TUN device
+		return tryOpenTun(name, virtualIP)
+	}
+
+	return nil, err
+}
+
+func tryOpenTun(name string, virtualIP string) (Device, error) {
 	fd, err := syscall.Open("/dev/net/tun", os.O_RDWR, 0)
 	if err != nil {
-		return nil, fmt.Errorf("open /dev/net/tun: %w (root/CAP_NET_ADMIN required for TUN mode)", err)
+		return nil, fmt.Errorf("open /dev/net/tun: %w", err)
 	}
 
 	var req ifreq
@@ -57,7 +88,7 @@ func OpenDevice(name string, virtualIP string) (Device, error) {
 
 	f := os.NewFile(uintptr(fd), "/dev/net/tun")
 
-	// Configure IP and bring interface up
+	// Configure IP and bring interface up (if running as root or if not already done)
 	if virtualIP != "" {
 		_ = exec.Command("ip", "addr", "add", virtualIP+"/16", "dev", actualName).Run()
 		_ = exec.Command("ip", "link", "set", "dev", actualName, "up").Run()

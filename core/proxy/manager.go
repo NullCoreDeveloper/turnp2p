@@ -25,6 +25,7 @@ type ForwardingRule struct {
 	ID         string `json:"id"`
 	Name       string `json:"name"`
 	Protocol   string `json:"protocol"` // "TCP" or "UDP"
+	LocalIP    string `json:"localIp"`  // e.g. "127.0.X.Y" or "127.0.0.1"
 	LocalPort  int    `json:"localPort"`
 	RemoteIP   string `json:"remoteIp"`
 	RemotePort int    `json:"remotePort"`
@@ -77,18 +78,25 @@ func (m *Manager) AddRule(rule ForwardingRule) error {
 	if rule.Protocol == "" {
 		rule.Protocol = "TCP"
 	}
+	if rule.LocalIP == "" {
+		rule.LocalIP = "127.0.0.1"
+	}
 
-	// Check if local port is already taken by another rule
+	// Check if local IP:port is already taken by another rule
 	for _, r := range m.rules {
-		if r.rule.LocalPort == rule.LocalPort {
-			return fmt.Errorf("%w: port %d is already in use by %s", ErrRuleAlreadyExists, rule.LocalPort, r.rule.Name)
+		rIP := r.rule.LocalIP
+		if rIP == "" {
+			rIP = "127.0.0.1"
+		}
+		if rIP == rule.LocalIP && r.rule.LocalPort == rule.LocalPort {
+			return fmt.Errorf("%w: %s:%d is already in use by %s", ErrRuleAlreadyExists, rule.LocalIP, rule.LocalPort, r.rule.Name)
 		}
 	}
 
-	listenAddr := fmt.Sprintf("127.0.0.1:%d", rule.LocalPort)
+	listenAddr := fmt.Sprintf("%s:%d", rule.LocalIP, rule.LocalPort)
 	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
-		return fmt.Errorf("failed to bind local port %d: %w", rule.LocalPort, err)
+		return fmt.Errorf("failed to bind local %s:%d: %w", rule.LocalIP, rule.LocalPort, err)
 	}
 
 	ruleCtx, ruleCancel := context.WithCancel(m.ctx)

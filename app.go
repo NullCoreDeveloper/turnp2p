@@ -181,7 +181,7 @@ func (a *App) JoinNetwork(vkLink string, nickname string, customDomain string, o
 				if a.networkMode == "tun" {
 					hostsMap[p.Domain] = p.VirtualIP
 				} else {
-					hostsMap[p.Domain] = "127.0.0.1"
+					hostsMap[p.Domain] = p2p.ToLoopbackIP(p.VirtualIP)
 				}
 			}
 		}
@@ -429,7 +429,11 @@ func (a *App) autoSyncProxyRules(peers []p2p.Peer) {
 	currentRules := a.proxyMgr.ListRules()
 	existingRuleMap := make(map[string]bool)
 	for _, r := range currentRules {
-		existingRuleMap[fmt.Sprintf("%s:%d", r.RemoteIP, r.RemotePort)] = true
+		rIP := r.LocalIP
+		if rIP == "" {
+			rIP = "127.0.0.1"
+		}
+		existingRuleMap[fmt.Sprintf("%s:%d", rIP, r.LocalPort)] = true
 	}
 
 	for _, p := range peers {
@@ -437,12 +441,15 @@ func (a *App) autoSyncProxyRules(peers []p2p.Peer) {
 		if targetAddr == "" {
 			targetAddr = p.VirtualIP
 		}
+		loopbackIP := p2p.ToLoopbackIP(p.VirtualIP)
+
 		for _, port := range p.SharedPorts {
-			key := fmt.Sprintf("%s:%d", targetAddr, port)
+			key := fmt.Sprintf("%s:%d", loopbackIP, port)
 			if !existingRuleMap[key] {
 				_ = a.proxyMgr.AddRule(proxy.ForwardingRule{
 					Name:       fmt.Sprintf("%s :%d", p.Name, port),
 					Protocol:   "TCP",
+					LocalIP:    loopbackIP,
 					LocalPort:  port,
 					RemoteIP:   targetAddr,
 					RemotePort: port,

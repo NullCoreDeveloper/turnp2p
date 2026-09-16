@@ -1,8 +1,10 @@
 package hosts
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -42,6 +44,47 @@ func NewManager(customPath string) *Manager {
 	}
 }
 
+// CheckWritable checks if the hosts file is currently writable.
+func (m *Manager) CheckWritable() bool {
+	f, err := os.OpenFile(m.hostsPath, os.O_WRONLY|os.O_APPEND, 0644)
+	if err == nil {
+		_ = f.Close()
+		return true
+	}
+	return false
+}
+
+// RequestPermissions prompts the user once for elevated permissions to write to hosts.
+// On Linux: uses pkexec with setfacl or chmod.
+// On Windows: launches elevated PowerShell with icacls.
+func (m *Manager) RequestPermissions() error {
+	if m.CheckWritable() {
+		return nil
+	}
+
+	if runtime.GOOS == "windows" {
+		cmd := exec.Command("powershell", "-Command", fmt.Sprintf(`Start-Process powershell -Verb RunAs -Wait -ArgumentList '-Command icacls "%s" /grant "Users:(M)"'`, m.hostsPath))
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("failed to grant windows hosts permissions: %w", err)
+		}
+	} else {
+		currentUser := os.Getenv("USER")
+		if currentUser == "" {
+			currentUser = "root"
+		}
+		script := fmt.Sprintf("setfacl -m u:%s:rw %s 2>/dev/null || chmod 666 %s", currentUser, m.hostsPath, m.hostsPath)
+		cmd := exec.Command("pkexec", "sh", "-c", script)
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("failed to grant linux hosts permissions via pkexec: %w", err)
+		}
+	}
+
+	if !m.CheckWritable() {
+		return errors.New("hosts file is still not writable after elevation attempt")
+	}
+	return nil
+}
+
 // Sync updates the hosts file with current domain mappings.
 // If entries is empty, cleans up the TurnP2P section entirely.
 func (m *Manager) Sync(entries map[string]string) error {
@@ -61,7 +104,7 @@ func (m *Manager) Sync(entries map[string]string) error {
 	cleaned := removeTurnP2PBlock(content)
 
 	if len(entries) == 0 {
-		return os.WriteFile(m.hostsPath, []byte(cleaned), 0644)
+		return m.writeFileWithElevation(m.hostsPath, []byte(cleaned))
 	}
 
 	var sb strings.Builder
@@ -80,7 +123,18 @@ func (m *Manager) Sync(entries map[string]string) error {
 	}
 	sb.WriteString(markerEnd + "\n")
 
-	return os.WriteFile(m.hostsPath, []byte(sb.String()), 0644)
+	return m.writeFileWithElevation(m.hostsPath, []byte(sb.String()))
+}
+
+func (m *Manager) writeFileWithElevation(path string, data []byte) error {
+	err := os.WriteFile(path, data, 0644)
+	if err != nil && os.IsPermission(err) {
+		// Attempt to request elevation once
+		if reqErr := m.RequestPermissions(); reqErr == nil {
+			err = os.WriteFile(path, data, 0644)
+		}
+	}
+	return err
 }
 
 // Clean removes all TurnP2P entries from the hosts file.
