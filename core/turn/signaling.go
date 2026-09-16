@@ -8,8 +8,11 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	neturl "net/url"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -28,31 +31,43 @@ type SignalingPeerInfo struct {
 
 // SignalingClient manages WebSocket connection to the VK Call signaling server for peer exchange.
 type SignalingClient struct {
-	wsEndpoint string
-	roomHash   string
-	obfKey     string
-	conn       *websocket.Conn
-	mu         sync.Mutex
-	onPeerAddr func(relayAddr string)
-	onFrame    func(data []byte, fromRelay string)
-	localInfo  SignalingPeerInfo
-	ctx        context.Context
-	cancel     context.CancelFunc
+	wsEndpoint   string
+	roomHash     string
+	obfKey       string
+	myUserID     string
+	myInternalID int64
+	participants map[int64]bool
+	seq          int64
+	conn         *websocket.Conn
+	mu           sync.Mutex
+	onPeerAddr   func(relayAddr string)
+	onFrame      func(data []byte, fromRelay string)
+	localInfo    SignalingPeerInfo
+	ctx          context.Context
+	cancel       context.CancelFunc
 }
 
 // NewSignalingClient creates a new VK Call signaling channel client.
 func NewSignalingClient(wsEndpoint string, link string, obfKey string) *SignalingClient {
-	// roomHash is derived from the VK link ONLY so all peers in the same room
-	// compute the same hash regardless of their individual obfKey.
-	// The obfKey is a per-session TURN encryption key and must NOT be mixed in here.
 	h := sha256.Sum256([]byte(link))
 	roomHash := hex.EncodeToString(h[:16])
 
-	return &SignalingClient{
-		wsEndpoint: wsEndpoint,
-		roomHash:   roomHash,
-		obfKey:     obfKey,
+	myUID := ""
+	if u, err := neturl.Parse(wsEndpoint); err == nil {
+		myUID = u.Query().Get("userId")
 	}
+
+	return &SignalingClient{
+		wsEndpoint:   wsEndpoint,
+		roomHash:     roomHash,
+		obfKey:       obfKey,
+		myUserID:     myUID,
+		participants: make(map[int64]bool),
+	}
+}
+
+func (s *SignalingClient) nextSeq() int64 {
+	return atomic.AddInt64(&s.seq, 1)
 }
 
 // Start begins listening to the signaling channel and broadcasting local relay address.
@@ -122,11 +137,11 @@ func (s *SignalingClient) runLoop() {
 
 		s.mu.Lock()
 		s.conn = conn
+		s.participants = make(map[int64]bool)
 		s.mu.Unlock()
 
 		log.Printf("[Signaling] Connected to VK Call WebSocket channel (%s)", s.localInfo.RelayAddr)
 
-		// Broadcast loop
 		broadcastTicker := time.NewTicker(2 * time.Second)
 		readDone := make(chan struct{})
 
@@ -141,9 +156,6 @@ func (s *SignalingClient) runLoop() {
 				s.handleMessage(msg)
 			}
 		}()
-
-		// Periodic announce
-		s.broadcastAnnounce()
 
 	loop:
 		for {
@@ -168,6 +180,10 @@ func (s *SignalingClient) broadcastAnnounce() {
 	s.mu.Lock()
 	conn := s.conn
 	info := s.localInfo
+	pids := make([]int64, 0, len(s.participants))
+	for pid := range s.participants {
+		pids = append(pids, pid)
+	}
 	s.mu.Unlock()
 
 	if conn == nil || info.RelayAddr == "" {
@@ -180,7 +196,6 @@ func (s *SignalingClient) broadcastAnnounce() {
 		return
 	}
 
-	// Encapsulate in custom event frame
 	msgObj := map[string]interface{}{
 		"type":     "turnp2p_announce",
 		"room":     s.roomHash,
@@ -189,10 +204,22 @@ func (s *SignalingClient) broadcastAnnounce() {
 		"sendTime": time.Now().UnixMilli(),
 	}
 
-	raw, _ := json.Marshal(msgObj)
-	log.Printf("[Signaling] >>> Sending announce: relay=%s room=%s", info.RelayAddr, s.roomHash)
-	if err := conn.WriteMessage(websocket.TextMessage, raw); err != nil {
-		log.Printf("[Signaling] >>> Send error: %v", err)
+	// Transmit data to each participant in the call via VK Call protocol
+	for _, pid := range pids {
+		transmitCmd := map[string]interface{}{
+			"command":         "transmit-data",
+			"sequence":        s.nextSeq(),
+			"participantId":   pid,
+			"participantType": "USER",
+			"data":            msgObj,
+		}
+		raw, err := json.Marshal(transmitCmd)
+		if err == nil {
+			_ = conn.WriteMessage(websocket.TextMessage, raw)
+		}
+	}
+	if len(pids) > 0 {
+		log.Printf("[Signaling] >>> Broadcast announce to %d peers: relay=%s room=%s", len(pids), info.RelayAddr, s.roomHash)
 	}
 }
 
@@ -201,6 +228,10 @@ func (s *SignalingClient) SendFrame(data []byte, targetAddr string) {
 	s.mu.Lock()
 	conn := s.conn
 	info := s.localInfo
+	pids := make([]int64, 0, len(s.participants))
+	for pid := range s.participants {
+		pids = append(pids, pid)
+	}
 	s.mu.Unlock()
 
 	if conn == nil {
@@ -215,51 +246,159 @@ func (s *SignalingClient) SendFrame(data []byte, targetAddr string) {
 		"data":   hex.EncodeToString(data),
 	}
 
-	raw, _ := json.Marshal(msgObj)
-	_ = conn.WriteMessage(websocket.TextMessage, raw)
+	for _, pid := range pids {
+		transmitCmd := map[string]interface{}{
+			"command":         "transmit-data",
+			"sequence":        s.nextSeq(),
+			"participantId":   pid,
+			"participantType": "USER",
+			"data":            msgObj,
+		}
+		raw, err := json.Marshal(transmitCmd)
+		if err == nil {
+			_ = conn.WriteMessage(websocket.TextMessage, raw)
+		}
+	}
 }
 
 func (s *SignalingClient) handleMessage(msg []byte) {
+	// Handle ping/pong heartbeat from VK server
+	if string(msg) == "ping" {
+		s.mu.Lock()
+		conn := s.conn
+		s.mu.Unlock()
+		if conn != nil {
+			_ = conn.WriteMessage(websocket.TextMessage, []byte("pong"))
+		}
+		return
+	}
+
 	var obj map[string]interface{}
 	if err := json.Unmarshal(msg, &obj); err != nil {
-		// VK may send binary/non-JSON frames — log raw
-		log.Printf("[Signaling] <<< RAW (non-JSON, %d bytes): %s", len(msg), truncate(string(msg), 400))
+		log.Printf("[Signaling] <<< RAW (%d bytes): %s", len(msg), truncate(string(msg), 400))
 		return
 	}
 
 	msgType, _ := obj["type"].(string)
 
-	// Log everything the VK server sends us (helps diagnose the protocol)
-	if msgType != "turnp2p_announce" && msgType != "turnp2p_frame" {
-		raw, _ := json.Marshal(obj)
-		log.Printf("[Signaling] <<< VK server msg type=%q: %s", msgType, truncate(string(raw), 500))
+	// Check for ServerHello or conversation updates containing participants
+	if conv, ok := obj["conversation"].(map[string]interface{}); ok {
+		s.updateParticipantsFromConversation(conv)
 	}
 
-	// Verify room hash
-	if obj["room"] != s.roomHash {
-		// Only log non-VK messages so we don't spam with VK's own protocol frames
-		if msgType == "turnp2p_announce" || msgType == "turnp2p_frame" {
-			log.Printf("[Signaling] Dropped msg (wrong room): expected=%s got=%v", s.roomHash, obj["room"])
+	notifType, _ := obj["notification"].(string)
+	if notifType == "participant-joined" {
+		if part, ok := obj["participant"].(map[string]interface{}); ok {
+			pid := parseParticipantID(part["id"])
+			if pid > 0 && pid != s.myInternalID {
+				s.mu.Lock()
+				s.participants[pid] = true
+				s.mu.Unlock()
+				log.Printf("[Signaling] Peer joined call: participantId=%d", pid)
+				go s.broadcastAnnounce()
+			}
 		}
+	} else if notifType == "participant-left" {
+		if part, ok := obj["participant"].(map[string]interface{}); ok {
+			pid := parseParticipantID(part["id"])
+			if pid > 0 {
+				s.mu.Lock()
+				delete(s.participants, pid)
+				s.mu.Unlock()
+				log.Printf("[Signaling] Peer left call: participantId=%d", pid)
+			}
+		}
+	} else if notifType == "transmitted-data" {
+		// Data received from another peer via VK call signaling!
+		var dataMap map[string]interface{}
+		switch d := obj["data"].(type) {
+		case map[string]interface{}:
+			dataMap = d
+		case string:
+			_ = json.Unmarshal([]byte(d), &dataMap)
+		}
+
+		if dataMap != nil {
+			s.handleTurnP2PData(dataMap)
+			return
+		}
+	}
+
+	// Also handle legacy/direct message formats
+	if msgType == "turnp2p_announce" || msgType == "turnp2p_frame" {
+		s.handleTurnP2PData(obj)
+		return
+	}
+
+	if msgType != "notification" {
+		raw, _ := json.Marshal(obj)
+		log.Printf("[Signaling] <<< VK server msg type=%q: %s", msgType, truncate(string(raw), 400))
+	}
+}
+
+func (s *SignalingClient) updateParticipantsFromConversation(conv map[string]interface{}) {
+	parts, ok := conv["participants"].([]interface{})
+	if !ok {
+		return
+	}
+
+	s.mu.Lock()
+	newPeers := 0
+	for _, p := range parts {
+		pmap, ok := p.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		pid := parseParticipantID(pmap["id"])
+		if pid == 0 {
+			continue
+		}
+
+		// Check if this participant is myself
+		isSelf := false
+		if ext, ok := pmap["externalId"].(map[string]interface{}); ok {
+			extID := fmt.Sprintf("%v", ext["id"])
+			if extID != "" && extID == s.myUserID {
+				s.myInternalID = pid
+				isSelf = true
+			}
+		}
+
+		if !isSelf && pid != s.myInternalID {
+			if !s.participants[pid] {
+				s.participants[pid] = true
+				newPeers++
+			}
+		}
+	}
+	total := len(s.participants)
+	s.mu.Unlock()
+
+	if newPeers > 0 {
+		log.Printf("[Signaling] Discovered %d other participant(s) in call room (total: %d)", newPeers, total)
+		go s.broadcastAnnounce()
+	}
+}
+
+func (s *SignalingClient) handleTurnP2PData(obj map[string]interface{}) {
+	if obj["room"] != s.roomHash {
 		return
 	}
 
 	relay, _ := obj["relay"].(string)
-	if relay == s.localInfo.RelayAddr {
+	if relay == s.localInfo.RelayAddr || relay == "" {
 		return
 	}
 
+	msgType, _ := obj["type"].(string)
 	switch msgType {
 	case "turnp2p_announce":
-		if relay != "" {
-			log.Printf("[Signaling] <<< Discovered peer relay: %s", relay)
-			s.mu.Lock()
-			cb := s.onPeerAddr
-			s.mu.Unlock()
-
-			if cb != nil {
-				cb(relay)
-			}
+		log.Printf("[Signaling] <<< Discovered peer relay via call channel: %s", relay)
+		s.mu.Lock()
+		cb := s.onPeerAddr
+		s.mu.Unlock()
+		if cb != nil {
+			cb(relay)
 		}
 	case "turnp2p_frame":
 		hexData, _ := obj["data"].(string)
@@ -269,12 +408,27 @@ func (s *SignalingClient) handleMessage(msg []byte) {
 				s.mu.Lock()
 				fCb := s.onFrame
 				s.mu.Unlock()
-
 				if fCb != nil {
 					fCb(raw, relay)
 				}
 			}
 		}
+	}
+}
+
+func parseParticipantID(val interface{}) int64 {
+	switch v := val.(type) {
+	case float64:
+		return int64(v)
+	case int64:
+		return v
+	case int:
+		return int64(v)
+	case string:
+		n, _ := strconv.ParseInt(v, 10, 64)
+		return n
+	default:
+		return 0
 	}
 }
 
