@@ -132,6 +132,20 @@ func (c *PionClient) Connect(ctx context.Context, creds *Credentials, obfKey str
 	c.relayAddr = relayConn.LocalAddr()
 	c.serverIP = turnUDPAddr.IP.String()
 
+	// Pre-authorize permissions for all TURN server IPs to allow incoming relayed traffic from peers
+	for _, sa := range creds.ServerAddrs {
+		host, _, _ := net.SplitHostPort(sa)
+		if host == "" {
+			host = sa
+		}
+		if ip := net.ParseIP(host); ip != nil {
+			_ = turnClient.CreatePermission(&net.UDPAddr{IP: ip, Port: 0})
+		}
+	}
+	if ip := net.ParseIP(turnUDPAddr.IP.String()); ip != nil {
+		_ = turnClient.CreatePermission(&net.UDPAddr{IP: ip, Port: 0})
+	}
+
 	// 5. Initialize rtpopus3 obfuscator
 	obfuscator, err := obf.NewRTPOpus3(obfKey)
 	if err != nil {

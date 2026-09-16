@@ -38,6 +38,7 @@ type SignalingClient struct {
 	myUserID     string
 	myInternalID int64
 	participants map[int64]string // key: participantId -> participantType
+	peerIDs      map[int64]int64  // key: participantId -> peerId
 	seq          int64
 	conn         *websocket.Conn
 	mu           sync.Mutex
@@ -71,6 +72,7 @@ func NewSignalingClient(wsEndpoint string, link string, obfKey string) *Signalin
 		obfKey:       obfKey,
 		myUserID:     myUID,
 		participants: make(map[int64]string),
+		peerIDs:      make(map[int64]int64),
 	}
 }
 
@@ -146,9 +148,24 @@ func (s *SignalingClient) runLoop() {
 		s.mu.Lock()
 		s.conn = conn
 		s.participants = make(map[int64]string)
+		s.peerIDs = make(map[int64]int64)
 		s.mu.Unlock()
 
 		log.Printf("[Signaling] Connected to VK Call WebSocket channel (%s)", s.localInfo.RelayAddr)
+
+		// 1. Enable data channel on VK Calls server so transmit-data is permitted
+		mediaCmd := map[string]interface{}{
+			"command":  "update-media-settings",
+			"sequence": s.nextSeq(),
+			"mediaSettings": map[string]interface{}{
+				"isDataEnabled":  true,
+				"isAudioEnabled": true,
+				"isVideoEnabled": false,
+			},
+		}
+		if rawM, err := json.Marshal(mediaCmd); err == nil {
+			_ = conn.WriteMessage(websocket.TextMessage, rawM)
+		}
 
 		broadcastTicker := time.NewTicker(2 * time.Second)
 		readDone := make(chan struct{})
@@ -189,12 +206,13 @@ func (s *SignalingClient) broadcastAnnounce() {
 	conn := s.conn
 	info := s.localInfo
 	type partTarget struct {
-		id    int64
-		pType string
+		id     int64
+		pType  string
+		peerID int64
 	}
 	targets := make([]partTarget, 0, len(s.participants))
 	for pid, pType := range s.participants {
-		targets = append(targets, partTarget{id: pid, pType: pType})
+		targets = append(targets, partTarget{id: pid, pType: pType, peerID: s.peerIDs[pid]})
 	}
 	s.mu.Unlock()
 
@@ -230,6 +248,21 @@ func (s *SignalingClient) broadcastAnnounce() {
 		if err == nil {
 			_ = conn.WriteMessage(websocket.TextMessage, raw)
 		}
+
+		if target.peerID > 0 {
+			peerCmd := map[string]interface{}{
+				"command":  "transmit-data",
+				"sequence": s.nextSeq(),
+				"peerId": map[string]interface{}{
+					"id":   target.peerID,
+					"type": "WEB_SOCKET",
+				},
+				"data": msgObj,
+			}
+			if rawP, err := json.Marshal(peerCmd); err == nil {
+				_ = conn.WriteMessage(websocket.TextMessage, rawP)
+			}
+		}
 	}
 
 	if len(targets) > 0 {
@@ -243,12 +276,13 @@ func (s *SignalingClient) SendFrame(data []byte, targetAddr string) {
 	conn := s.conn
 	info := s.localInfo
 	type partTarget struct {
-		id    int64
-		pType string
+		id     int64
+		pType  string
+		peerID int64
 	}
 	targets := make([]partTarget, 0, len(s.participants))
 	for pid, pType := range s.participants {
-		targets = append(targets, partTarget{id: pid, pType: pType})
+		targets = append(targets, partTarget{id: pid, pType: pType, peerID: s.peerIDs[pid]})
 	}
 	s.mu.Unlock()
 
@@ -322,12 +356,25 @@ func (s *SignalingClient) handleMessage(msg []byte) {
 				go s.broadcastAnnounce()
 			}
 		}
+	} else if notifType == "registered-peer" {
+		pid := parseParticipantID(obj["participantId"])
+		if peerObj, ok := obj["peerId"].(map[string]interface{}); ok {
+			peerID := parseParticipantID(peerObj["id"])
+			if pid > 0 && peerID > 0 {
+				s.mu.Lock()
+				s.peerIDs[pid] = peerID
+				s.mu.Unlock()
+				log.Printf("[Signaling] Registered peer: participantId=%d -> peerId=%d", pid, peerID)
+				go s.broadcastAnnounce()
+			}
+		}
 	} else if notifType == "participant-left" {
 		if part, ok := obj["participant"].(map[string]interface{}); ok {
 			pid := parseParticipantID(part["id"])
 			if pid > 0 {
 				s.mu.Lock()
 				delete(s.participants, pid)
+				delete(s.peerIDs, pid)
 				s.mu.Unlock()
 				log.Printf("[Signaling] Peer left call: participantId=%d", pid)
 			}
