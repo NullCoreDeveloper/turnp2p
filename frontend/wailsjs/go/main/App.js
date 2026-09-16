@@ -34,12 +34,36 @@ export function GetStatus() {
   return window['go']['main']['App']['GetStatus']();
 }
 
+export function HasLastJoinParams() {
+  return window['go']['main']['App']['HasLastJoinParams']();
+}
+
+export function IsWindowVisible() {
+  return window['go']['main']['App']['IsWindowVisible']();
+}
+
 export function JoinNetwork(arg1, arg2, arg3, arg4, arg5) {
   return window['go']['main']['App']['JoinNetwork'](arg1, arg2, arg3, arg4, arg5);
 }
 
 export function LeaveNetwork() {
   return window['go']['main']['App']['LeaveNetwork']();
+}
+
+export function NotifyWindowVisibility(arg1) {
+  return window['go']['main']['App']['NotifyWindowVisibility'](arg1);
+}
+
+export function OnStatusChange(arg1) {
+  return window['go']['main']['App']['OnStatusChange'](arg1);
+}
+
+export function OnVisibilityChange(arg1) {
+  return window['go']['main']['App']['OnVisibilityChange'](arg1);
+}
+
+export function ReconnectLast() {
+  return window['go']['main']['App']['ReconnectLast']();
 }
 
 export function RemoveForwardRule(arg1) {

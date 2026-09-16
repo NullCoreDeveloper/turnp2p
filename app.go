@@ -37,26 +37,39 @@ type ConnectionStatus struct {
 	HostsSync    bool     `json:"hostsSync"`
 }
 
+type lastJoinParams struct {
+	vkLink       string
+	nickname     string
+	customDomain string
+	obfKey       string
+	streamsCount int
+}
+
 // App struct manages core lifecycle and Wails bindings.
 type App struct {
-	ctx          context.Context
-	turnConn     net.PacketConn
-	meshNode     *p2p.MeshNode
-	proxyMgr     *proxy.Manager
-	hostsMgr     *hosts.Manager
-	tunRouter    *tun.Router
-	sigClient    *turn.SignalingClient
-	networkMode  string // "userspace" (default) or "tun"
-	status       ConnectionStatus
-	mu           sync.RWMutex
+	ctx                 context.Context
+	turnConn            net.PacketConn
+	meshNode            *p2p.MeshNode
+	proxyMgr            *proxy.Manager
+	hostsMgr            *hosts.Manager
+	tunRouter           *tun.Router
+	sigClient           *turn.SignalingClient
+	networkMode         string // "userspace" (default) or "tun"
+	status              ConnectionStatus
+	statusListeners     []func(ConnectionStatus)
+	visibilityListeners []func(bool)
+	windowVisible       bool
+	lastParams          lastJoinParams
+	mu                  sync.RWMutex
 }
 
 // NewApp creates a new App application struct.
 func NewApp() *App {
 	return &App{
-		proxyMgr:    proxy.NewManager(nil),
-		hostsMgr:    hosts.NewManager(""),
-		networkMode: "userspace",
+		proxyMgr:      proxy.NewManager(nil),
+		hostsMgr:      hosts.NewManager(""),
+		networkMode:   "userspace",
+		windowVisible: true,
 		status: ConnectionStatus{
 			Connected:    false,
 			StatusText:   "Disconnected",
@@ -89,6 +102,87 @@ func (a *App) GetStatus() ConnectionStatus {
 	return a.status
 }
 
+// OnStatusChange registers a callback that fires whenever ConnectionStatus changes.
+func (a *App) OnStatusChange(listener func(ConnectionStatus)) {
+	a.mu.Lock()
+	a.statusListeners = append(a.statusListeners, listener)
+	a.mu.Unlock()
+}
+
+// OnVisibilityChange registers a callback that fires whenever window visibility changes.
+func (a *App) OnVisibilityChange(listener func(bool)) {
+	a.mu.Lock()
+	a.visibilityListeners = append(a.visibilityListeners, listener)
+	a.mu.Unlock()
+}
+
+// NotifyWindowVisibility is invoked by the frontend (e.g. visibilitychange) or window events.
+func (a *App) NotifyWindowVisibility(visible bool) {
+	a.mu.Lock()
+	a.windowVisible = visible
+	listeners := append([]func(bool){}, a.visibilityListeners...)
+	a.mu.Unlock()
+
+	for _, l := range listeners {
+		l(visible)
+	}
+}
+
+// IsWindowVisible returns whether the window is currently visible.
+func (a *App) IsWindowVisible() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.windowVisible
+}
+
+// HasLastJoinParams checks if previous connection parameters are available for quick reconnection.
+func (a *App) HasLastJoinParams() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.lastParams.vkLink != ""
+}
+
+// ReconnectLast reconnects using the previous connection settings.
+func (a *App) ReconnectLast() (*ConnectionStatus, error) {
+	a.mu.RLock()
+	params := a.lastParams
+	a.mu.RUnlock()
+
+	if params.vkLink == "" {
+		return nil, fmt.Errorf("no saved connection settings")
+	}
+	return a.JoinNetwork(params.vkLink, params.nickname, params.customDomain, params.obfKey, params.streamsCount)
+}
+
+func (a *App) emitStatusChangeLocked() {
+	if a.ctx != nil {
+		wailsRuntime.EventsEmit(a.ctx, "status_change", a.status)
+	}
+	listeners := append([]func(ConnectionStatus){}, a.statusListeners...)
+	status := a.status
+	go func() {
+		for _, l := range listeners {
+			l(status)
+		}
+	}()
+}
+
+func (a *App) emitStatusChange() {
+	a.mu.RLock()
+	listeners := append([]func(ConnectionStatus){}, a.statusListeners...)
+	status := a.status
+	a.mu.RUnlock()
+
+	if a.ctx != nil {
+		wailsRuntime.EventsEmit(a.ctx, "status_change", status)
+	}
+	go func() {
+		for _, l := range listeners {
+			l(status)
+		}
+	}()
+}
+
 // SetNetworkMode switches between "userspace" and "tun" modes.
 func (a *App) SetNetworkMode(mode string) error {
 	a.mu.Lock()
@@ -100,9 +194,7 @@ func (a *App) SetNetworkMode(mode string) error {
 	a.networkMode = mode
 	a.status.NetworkMode = mode
 
-	if a.ctx != nil {
-		wailsRuntime.EventsEmit(a.ctx, "status_change", a.status)
-	}
+	a.emitStatusChangeLocked()
 	return nil
 }
 
@@ -120,12 +212,18 @@ func (a *App) JoinNetwork(vkLink string, nickname string, customDomain string, o
 	}
 
 	a.status.StatusText = "Resolving VK Call..."
-	if a.ctx != nil {
-		wailsRuntime.EventsEmit(a.ctx, "status_change", a.status)
-	}
+	a.emitStatusChangeLocked()
 
 	if obfKey == "" {
 		obfKey = a.GenerateRandomKey()
+	}
+
+	a.lastParams = lastJoinParams{
+		vkLink:       vkLink,
+		nickname:     nickname,
+		customDomain: customDomain,
+		obfKey:       obfKey,
+		streamsCount: streamsCount,
 	}
 
 	// 1. Resolve TURN credentials via anonymous VK Call link (with 10 min cache)
@@ -135,24 +233,18 @@ func (a *App) JoinNetwork(vkLink string, nickname string, customDomain string, o
 	creds, err := turn.FetchVKTurnCredentials(ctx, vkLink)
 	if err != nil {
 		a.status.StatusText = fmt.Sprintf("Auth Failed: %v", err)
-		if a.ctx != nil {
-			wailsRuntime.EventsEmit(a.ctx, "status_change", a.status)
-		}
+		a.emitStatusChangeLocked()
 		return nil, fmt.Errorf("failed to get TURN credentials: %w", err)
 	}
 
 	a.status.StatusText = fmt.Sprintf("Allocating %d parallel TURN streams (rtpopus3)...", streamsCount)
-	if a.ctx != nil {
-		wailsRuntime.EventsEmit(a.ctx, "status_change", a.status)
-	}
+	a.emitStatusChangeLocked()
 
 	// 2. Establish Multi-Stream TURN allocation with rtpopus3 obfuscation & auto-replenish maintainer
 	bondedPacketConn, err := turn.AllocateMultiStreamClient(context.Background(), creds, obfKey, streamsCount)
 	if err != nil {
 		a.status.StatusText = fmt.Sprintf("TURN Relay Failed: %v", err)
-		if a.ctx != nil {
-			wailsRuntime.EventsEmit(a.ctx, "status_change", a.status)
-		}
+		a.emitStatusChangeLocked()
 		return nil, fmt.Errorf("failed to allocate TURN relay: %w", err)
 	}
 
@@ -161,9 +253,7 @@ func (a *App) JoinNetwork(vkLink string, nickname string, customDomain string, o
 		if a.status.Connected {
 			a.status.StreamsCount = active
 			a.status.StatusText = fmt.Sprintf("Connected (%d/%d parallel streams, rtpopus3)", active, target)
-			if a.ctx != nil {
-				wailsRuntime.EventsEmit(a.ctx, "status_change", a.status)
-			}
+			a.emitStatusChangeLocked()
 		}
 		a.mu.Unlock()
 	})
@@ -276,9 +366,7 @@ func (a *App) JoinNetwork(vkLink string, nickname string, customDomain string, o
 		HostsSync:    true,
 	}
 
-	if a.ctx != nil {
-		wailsRuntime.EventsEmit(a.ctx, "status_change", a.status)
-	}
+	a.emitStatusChangeLocked()
 
 	log.Printf("[App] Network joined successfully: %s (%s, %s) in %s mode with %d streams", name, vIP, domain, activeMode, initialActive)
 	return &a.status, nil
@@ -341,8 +429,9 @@ func (a *App) LeaveNetwork() error {
 		HostsSync:    false,
 	}
 
+	a.emitStatusChangeLocked()
+
 	if a.ctx != nil {
-		wailsRuntime.EventsEmit(a.ctx, "status_change", a.status)
 		wailsRuntime.EventsEmit(a.ctx, "peers_updated", []p2p.Peer{})
 	}
 
@@ -359,9 +448,7 @@ func (a *App) SetFirewallMode(mode string) error {
 	}
 	a.status.FirewallMode = mode
 
-	if a.ctx != nil {
-		wailsRuntime.EventsEmit(a.ctx, "status_change", a.status)
-	}
+	a.emitStatusChangeLocked()
 	return nil
 }
 

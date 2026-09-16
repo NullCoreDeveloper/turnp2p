@@ -5,7 +5,9 @@ go 1.25.0
 require (
 	github.com/bogdanfinn/fhttp v0.6.9
 	github.com/bogdanfinn/tls-client v1.16.0
+	github.com/energye/systray v1.0.3
 	github.com/google/uuid v1.6.0
+	github.com/gorilla/websocket v1.5.3
 	github.com/pion/turn/v4 v4.1.4
 	github.com/wailsapp/wails/v2 v2.16.0
 	golang.org/x/crypto v0.53.0
@@ -24,7 +26,6 @@ require (
 	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
-	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/jchv/go-winloader v0.0.0-20210711035445-715c2860da7e // indirect
 	github.com/klauspost/compress v1.18.2 // indirect
 	github.com/labstack/echo/v4 v4.13.3 // indirect

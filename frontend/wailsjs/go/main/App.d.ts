@@ -20,9 +20,21 @@ export function GetPeers():Promise<Array<p2p.Peer>>;
 
 export function GetStatus():Promise<main.ConnectionStatus>;
 
+export function HasLastJoinParams():Promise<boolean>;
+
+export function IsWindowVisible():Promise<boolean>;
+
 export function JoinNetwork(arg1:string,arg2:string,arg3:string,arg4:string,arg5:number):Promise<main.ConnectionStatus>;
 
 export function LeaveNetwork():Promise<void>;
+
+export function NotifyWindowVisibility(arg1:boolean):Promise<void>;
+
+export function OnStatusChange(arg1:any):Promise<void>;
+
+export function OnVisibilityChange(arg1:any):Promise<void>;
+
+export function ReconnectLast():Promise<main.ConnectionStatus>;
 
 export function RemoveForwardRule(arg1:string):Promise<void>;
 

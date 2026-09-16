@@ -97,6 +97,7 @@ export namespace proxy {
 	    id: string;
 	    name: string;
 	    protocol: string;
+	    localIp: string;
 	    localPort: number;
 	    remoteIp: string;
 	    remotePort: number;
@@ -111,6 +112,7 @@ export namespace proxy {
 	        this.id = source["id"];
 	        this.name = source["name"];
 	        this.protocol = source["protocol"];
+	        this.localIp = source["localIp"];
 	        this.localPort = source["localPort"];
 	        this.remoteIp = source["remoteIp"];
 	        this.remotePort = source["remotePort"];

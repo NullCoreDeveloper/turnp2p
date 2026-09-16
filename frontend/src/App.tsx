@@ -157,6 +157,20 @@ export function App() {
         setPeers(updatedPeers || []);
       });
     }
+
+    const handleVisibility = () => {
+      const isVisible = document.visibilityState === 'visible';
+      // @ts-ignore
+      if (window.go?.main?.App?.NotifyWindowVisibility) {
+        // @ts-ignore
+        window.go.main.App.NotifyWindowVisibility(isVisible);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
   }, []);
 
   // Periodic background sync with core to guarantee 0% chance of UI/Core desync
