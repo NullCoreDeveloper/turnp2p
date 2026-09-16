@@ -42,7 +42,10 @@ type SignalingClient struct {
 
 // NewSignalingClient creates a new VK Call signaling channel client.
 func NewSignalingClient(wsEndpoint string, link string, obfKey string) *SignalingClient {
-	h := sha256.Sum256([]byte(link + ":" + obfKey))
+	// roomHash is derived from the VK link ONLY so all peers in the same room
+	// compute the same hash regardless of their individual obfKey.
+	// The obfKey is a per-session TURN encryption key and must NOT be mixed in here.
+	h := sha256.Sum256([]byte(link))
 	roomHash := hex.EncodeToString(h[:16])
 
 	return &SignalingClient{
@@ -187,7 +190,10 @@ func (s *SignalingClient) broadcastAnnounce() {
 	}
 
 	raw, _ := json.Marshal(msgObj)
-	_ = conn.WriteMessage(websocket.TextMessage, raw)
+	log.Printf("[Signaling] >>> Sending announce: relay=%s room=%s", info.RelayAddr, s.roomHash)
+	if err := conn.WriteMessage(websocket.TextMessage, raw); err != nil {
+		log.Printf("[Signaling] >>> Send error: %v", err)
+	}
 }
 
 // SendFrame transmits a data/mesh frame to peers via the WebSocket signaling transport.
@@ -216,11 +222,25 @@ func (s *SignalingClient) SendFrame(data []byte, targetAddr string) {
 func (s *SignalingClient) handleMessage(msg []byte) {
 	var obj map[string]interface{}
 	if err := json.Unmarshal(msg, &obj); err != nil {
+		// VK may send binary/non-JSON frames — log raw
+		log.Printf("[Signaling] <<< RAW (non-JSON, %d bytes): %s", len(msg), truncate(string(msg), 400))
 		return
+	}
+
+	msgType, _ := obj["type"].(string)
+
+	// Log everything the VK server sends us (helps diagnose the protocol)
+	if msgType != "turnp2p_announce" && msgType != "turnp2p_frame" {
+		raw, _ := json.Marshal(obj)
+		log.Printf("[Signaling] <<< VK server msg type=%q: %s", msgType, truncate(string(raw), 500))
 	}
 
 	// Verify room hash
 	if obj["room"] != s.roomHash {
+		// Only log non-VK messages so we don't spam with VK's own protocol frames
+		if msgType == "turnp2p_announce" || msgType == "turnp2p_frame" {
+			log.Printf("[Signaling] Dropped msg (wrong room): expected=%s got=%v", s.roomHash, obj["room"])
+		}
 		return
 	}
 
@@ -229,11 +249,10 @@ func (s *SignalingClient) handleMessage(msg []byte) {
 		return
 	}
 
-	msgType, _ := obj["type"].(string)
-
 	switch msgType {
 	case "turnp2p_announce":
 		if relay != "" {
+			log.Printf("[Signaling] <<< Discovered peer relay: %s", relay)
 			s.mu.Lock()
 			cb := s.onPeerAddr
 			s.mu.Unlock()
@@ -257,4 +276,11 @@ func (s *SignalingClient) handleMessage(msg []byte) {
 			}
 		}
 	}
+}
+
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "...[truncated]"
 }

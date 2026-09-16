@@ -25,6 +25,6 @@ type VKCredentials struct {
 // DefaultVKCredentials contains official VK applications credentials pool.
 // Only apps that have access to calls.getAnonymousToken are included.
 var DefaultVKCredentials = []VKCredentials{
-	{ClientID: "7879029", ClientSecret: "aR5NKGmm03GYrCiNKsaw", Name: "VK_MVK_APP"},
 	{ClientID: "6287487", ClientSecret: "QbYic1K3lEV5kTGiqlq2", Name: "VK_WEB_APP"},
+	{ClientID: "7879029", ClientSecret: "aR5NKGmm03GYrCiNKsaw", Name: "VK_MVK_APP"},
 }

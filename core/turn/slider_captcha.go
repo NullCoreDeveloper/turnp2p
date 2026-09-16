@@ -14,6 +14,7 @@ import (
 	_ "image/jpeg"
 	"io"
 	"log"
+	"math"
 	"math/rand"
 	neturl "net/url"
 	"regexp"
@@ -50,7 +51,11 @@ func applyBrowserProfileFhttp(req *fhttp.Request, profile Profile) {
 	req.Header.Set("sec-ch-ua", profile.SecChUa)
 	req.Header.Set("sec-ch-ua-mobile", profile.SecChUaMobile)
 	req.Header.Set("sec-ch-ua-platform", profile.SecChUaPlatform)
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	if profile.AcceptLanguage != "" {
+		req.Header.Set("Accept-Language", profile.AcceptLanguage)
+	} else {
+		req.Header.Set("Accept-Language", "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7")
+	}
 	req.Header.Set("DNT", "1")
 }
 
@@ -104,23 +109,27 @@ func AutoSolveVkCaptcha(ctx context.Context, redirectURI string, sessionToken st
 
 	session := newCaptchaNotRobotSession(ctx, sessionToken, hash, redirectURI, client, profile)
 
-	// Attempt 1: Standard Checkbox Auto-Solve (fast, human-like checkbox check)
+	// Attempt 1: Standard Checkbox Auto-Solve (human-like checkbox check)
 	log.Printf("[Auto Captcha] Attempt 1/2: Solving via standard checkbox flow...")
 	token, err := session.solveCheckbox()
 	if err == nil && token != "" {
 		log.Printf("[Auto Captcha] Success! Checkbox captcha solved automatically.")
 		return token, nil
 	}
-	log.Printf("[Auto Captcha] Checkbox auto-solve failed (%v). Attempt 2/2: Slider solver...", err)
+	log.Printf("[Auto Captcha] Checkbox auto-solve failed (%v).", err)
 
-	// Attempt 2: Slider Solver (if checkbox requested slider or failed)
-	token, err = session.solveSlider(bootstrap.Settings)
-	if err == nil && token != "" {
-		log.Printf("[Auto Captcha] Success! Slider captcha solved automatically.")
-		return token, nil
+	// Attempt 2: Slider Solver ONLY if slider is actually requested/offered by VK
+	hasSlider := bootstrap.Settings != nil && (bootstrap.Settings.ShowCaptchaType == "slider" || bootstrap.Settings.SettingsByType["slider"] != "")
+	if hasSlider {
+		log.Printf("[Auto Captcha] Slider available. Attempting slider solver...")
+		token, err = session.solveSlider(bootstrap.Settings)
+		if err == nil && token != "" {
+			log.Printf("[Auto Captcha] Success! Slider captcha solved automatically.")
+			return token, nil
+		}
 	}
 
-	return "", fmt.Errorf("auto-solver failed (checkbox and slider both failed: %w)", err)
+	return "", fmt.Errorf("auto-solver failed (checkbox rejected: %w)", err)
 }
 
 func solvePoW(powInput string, difficulty int) string {
@@ -358,7 +367,11 @@ func cloneCaptchaSettings(src *captchaSettingsResponse) *captchaSettingsResponse
 }
 
 func generateBrowserFp(profile Profile) string {
-	data := profile.UserAgent + profile.SecChUa + "1920x1080x24" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	data := fmt.Sprintf("%s|%s|%s|%d|%d|%d|%s",
+		profile.UserAgent, profile.Platform, profile.SecChUa,
+		profile.ScreenWidth, profile.ScreenHeight, profile.HardwareConcurrency,
+		profile.AcceptLanguage,
+	)
 	h := md5.Sum([]byte(data))
 	return hex.EncodeToString(h[:])
 }
@@ -463,9 +476,51 @@ func (s *captchaNotRobotSession) requestSettings() (*captchaSettingsResponse, er
 }
 
 func buildCaptchaDeviceJSON(profile Profile) string {
+	langsJSON, _ := json.Marshal(profile.Languages)
+	primaryLang := "ru-RU"
+	if len(profile.Languages) > 0 {
+		primaryLang = profile.Languages[0]
+	}
+	availHeight := profile.ScreenHeight - 40
+	if profile.IsMobile {
+		availHeight = profile.ScreenHeight
+	}
+	platform := profile.Platform
+	if platform == "" {
+		platform = "Win32"
+	}
+	hwConc := profile.HardwareConcurrency
+	if hwConc == 0 {
+		hwConc = 8
+	}
+	devMem := profile.DeviceMemory
+	if devMem == 0 {
+		devMem = 8
+	}
+	dpr := profile.DevicePixelRatio
+	if dpr == 0 {
+		dpr = 1.0
+	}
+	w := profile.ScreenWidth
+	if w == 0 {
+		w = 1920
+	}
+	h := profile.ScreenHeight
+	if h == 0 {
+		h = 1080
+	}
+	iw := profile.InnerWidth
+	if iw == 0 {
+		iw = w
+	}
+	ih := profile.InnerHeight
+	if ih == 0 {
+		ih = availHeight
+	}
+
 	return fmt.Sprintf(
-		`{"screenWidth":1920,"screenHeight":1080,"screenAvailWidth":1920,"screenAvailHeight":1040,"innerWidth":1920,"innerHeight":969,"devicePixelRatio":1,"language":"en-US","languages":["en-US"],"webdriver":false,"hardwareConcurrency":8,"deviceMemory":8,"connectionEffectiveType":"4g","notificationsPermission":"default","userAgent":"%s","platform":"Win32"}`,
-		profile.UserAgent,
+		`{"screenWidth":%d,"screenHeight":%d,"screenAvailWidth":%d,"screenAvailHeight":%d,"innerWidth":%d,"innerHeight":%d,"devicePixelRatio":%.3f,"language":"%s","languages":%s,"webdriver":false,"hardwareConcurrency":%d,"deviceMemory":%d,"connectionEffectiveType":"4g","notificationsPermission":"default","userAgent":"%s","platform":"%s"}`,
+		w, h, w, availHeight, iw, ih, dpr, primaryLang, string(langsJSON), hwConc, devMem, profile.UserAgent, platform,
 	)
 }
 
@@ -522,8 +577,9 @@ func (s *captchaNotRobotSession) requestCheck(cursor string, answer string) (*ca
 	debugInfoBytes := md5.Sum([]byte(s.profile.UserAgent + strconv.FormatInt(time.Now().UnixNano(), 10)))
 	debugInfo := hex.EncodeToString(debugInfoBytes[:])
 
-	connectionRtt := "[50,50,50,50,50,50,50,50,50,50]"
-	connectionDownlink := "[9.5,9.5,9.5,9.5,9.5,9.5,9.5,9.5,9.5,9.5,9.5,9.5,9.5,9.5,9.5,9.5]"
+	rtts := []string{"45", "50", "48", "52", "49", "51", "47", "50"}
+	connectionRtt := "[" + strings.Join(rtts, ",") + "]"
+	connectionDownlink := "[9.8,9.5,9.7,10.1,9.4,9.6,9.8,9.5]"
 
 	values := s.baseValues()
 	values.Set("accelerometer", "[]")
@@ -555,14 +611,15 @@ func (s *captchaNotRobotSession) solveCheckbox() (string, error) {
 		return "", fmt.Errorf("settings failed: %w", err)
 	}
 
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(time.Duration(200+rand.Intn(150)) * time.Millisecond)
 
 	log.Printf("[Auto Captcha] Checkbox: Step 2/4: componentDone")
 	if err := s.requestComponentDone(); err != nil {
 		return "", fmt.Errorf("componentDone failed: %w", err)
 	}
 
-	time.Sleep(200 * time.Millisecond)
+	// Human reaction and reading delay between loading components and clicking the checkbox
+	time.Sleep(time.Duration(1100+rand.Intn(700)) * time.Millisecond)
 
 	log.Printf("[Auto Captcha] Checkbox: Step 3/4: check")
 	checkRes, err := s.requestCheckboxCheck()
@@ -1012,17 +1069,43 @@ func absDiff(left uint32, right uint32) int64 {
 }
 
 func generateFakeCursor() string {
-	startX := 600 + rand.Intn(400)
-	startY := 300 + rand.Intn(200)
-	startTime := time.Now().UnixMilli() - int64(rand.Intn(2000)+1000)
-	var points []string
-	for i := 0; i < 15+rand.Intn(10); i++ {
-		startX += rand.Intn(15) - 5
-		startY += rand.Intn(15) + 2
-		startTime += int64(rand.Intn(40) + 10)
-		points = append(points, fmt.Sprintf(`{"x":%d,"y":%d,"t":%d}`, startX, startY, startTime))
+	startX := 120 + rand.Intn(180)
+	startY := 60 + rand.Intn(120)
+	targetX := 28 + rand.Intn(12)
+	targetY := 28 + rand.Intn(12)
+
+	steps := 16 + rand.Intn(8)
+	startTime := time.Now().UnixMilli() - int64(steps*24+rand.Intn(80))
+
+	type cursorPoint struct {
+		X int   `json:"x"`
+		Y int   `json:"y"`
+		T int64 `json:"t"`
 	}
-	return "[" + strings.Join(points, ",") + "]"
+
+	points := make([]cursorPoint, 0, steps+1)
+	for i := 0; i <= steps; i++ {
+		t := float64(i) / float64(steps)
+		ease := 1.0 - math.Pow(1.0-t, 3.0)
+
+		x := int(float64(startX) + float64(targetX-startX)*ease)
+		y := int(float64(startY) + float64(targetY-startY)*ease)
+
+		if i > 0 && i < steps {
+			x += rand.Intn(3) - 1
+			y += rand.Intn(3) - 1
+		}
+
+		jitter := int64(rand.Intn(10) - 5)
+		pointTime := startTime + int64(float64(i)*24.0) + jitter
+		points = append(points, cursorPoint{X: x, Y: y, T: pointTime})
+	}
+
+	data, err := json.Marshal(points)
+	if err != nil {
+		return "[]"
+	}
+	return string(data)
 }
 
 func generateSliderCursor(candidateIndex int, candidateCount int) string {
@@ -1072,6 +1155,9 @@ func trySliderCaptchaCandidates(
 	}
 
 	limit := minInt(maxAttempts, len(candidates))
+	if limit > 2 {
+		limit = 2
+	}
 	if limit <= 0 {
 		return "", fmt.Errorf("slider has no attempts available")
 	}

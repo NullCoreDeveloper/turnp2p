@@ -61,7 +61,7 @@ func FetchVKTurnCredentials(ctx context.Context, link string) (*Credentials, err
 	var lastErr error
 
 	for _, creds := range DefaultVKCredentials {
-		prof := GetRandomProfile()
+		prof := GetProfileForApp(creds.Name)
 		jar := tlsclient.NewCookieJar()
 
 		client, err := tlsclient.NewHttpClient(tlsclient.NewNoopLogger(),
@@ -77,7 +77,7 @@ func FetchVKTurnCredentials(ctx context.Context, link string) (*Credentials, err
 		name := GenerateRandomName()
 		escapedName := neturl.QueryEscape(name)
 
-		log.Printf("[VK Auth] Trying app: %s (%s) with User-Agent: %s", creds.Name, creds.ClientID, prof.UserAgent)
+		log.Printf("[VK Auth] Trying app: %s (%s) with User-Agent: %s (platform: %s, mobile: %s)", creds.Name, creds.ClientID, prof.UserAgent, prof.Platform, prof.SecChUaMobile)
 
 		doRequest := func(data string, targetURL string) (map[string]interface{}, error) {
 			parsedURL, err := neturl.Parse(targetURL)
@@ -95,6 +95,7 @@ func FetchVKTurnCredentials(ctx context.Context, link string) (*Credentials, err
 			req.Header.Set("sec-ch-ua", prof.SecChUa)
 			req.Header.Set("sec-ch-ua-mobile", prof.SecChUaMobile)
 			req.Header.Set("sec-ch-ua-platform", prof.SecChUaPlatform)
+			req.Header.Set("Accept-Language", prof.AcceptLanguage)
 			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 			req.Header.Set("Accept", "*/*")
 			req.Header.Set("Origin", "https://vk.com")
