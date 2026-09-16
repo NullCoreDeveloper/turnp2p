@@ -236,12 +236,6 @@ func (s *SignalingClient) broadcastAnnounce() {
 		"sendTime": time.Now().UnixMilli(),
 	}
 
-	rawMsg, err := json.Marshal(msgObj)
-	if err != nil {
-		return
-	}
-	dataStr := base64.StdEncoding.EncodeToString(rawMsg)
-
 	// Send transmit-data to each participant via VK Call protocol
 	for _, target := range targets {
 		if target.peerID > 0 {
@@ -252,7 +246,7 @@ func (s *SignalingClient) broadcastAnnounce() {
 					"id":   target.peerID,
 					"type": "WEB_SOCKET",
 				},
-				"data": dataStr,
+				"data": msgObj,
 			}
 			if rawP, err := json.Marshal(peerCmd); err == nil {
 				_ = s.writeMsg(websocket.TextMessage, rawP)
@@ -263,7 +257,7 @@ func (s *SignalingClient) broadcastAnnounce() {
 				"sequence":        s.nextSeq(),
 				"participantId":   target.id,
 				"participantType": target.pType,
-				"data":            dataStr,
+				"data":            msgObj,
 			}
 			if raw, err := json.Marshal(transmitCmd); err == nil {
 				_ = s.writeMsg(websocket.TextMessage, raw)
@@ -305,12 +299,6 @@ func (s *SignalingClient) SendFrame(data []byte, targetAddr string) {
 		"data":   hex.EncodeToString(data),
 	}
 
-	rawMsg, err := json.Marshal(msgObj)
-	if err != nil {
-		return
-	}
-	dataStr := base64.StdEncoding.EncodeToString(rawMsg)
-
 	for _, target := range targets {
 		if target.peerID > 0 {
 			peerCmd := map[string]interface{}{
@@ -320,7 +308,7 @@ func (s *SignalingClient) SendFrame(data []byte, targetAddr string) {
 					"id":   target.peerID,
 					"type": "WEB_SOCKET",
 				},
-				"data": dataStr,
+				"data": msgObj,
 			}
 			if rawP, err := json.Marshal(peerCmd); err == nil {
 				log.Printf("[Signaling] >>> SendFrame %d bytes to peer %d via WS", len(data), target.peerID)
@@ -332,7 +320,7 @@ func (s *SignalingClient) SendFrame(data []byte, targetAddr string) {
 				"sequence":        s.nextSeq(),
 				"participantId":   target.id,
 				"participantType": "USER",
-				"data":            dataStr,
+				"data":            msgObj,
 			}
 			if raw, err := json.Marshal(transmitCmd); err == nil {
 				log.Printf("[Signaling] >>> SendFrame %d bytes to participant %d via WS", len(data), target.id)
