@@ -310,26 +310,31 @@ func (m *MultiStreamPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 		return 0, net.ErrClosed
 	}
 
-	targetHost := ""
-	if addr != nil {
-		targetHost, _, _ = net.SplitHostPort(addr.String())
-	}
+	// For critical discovery/heartbeat frames (0x01), broadcast across all active TURN streams to punch NAT
+	if len(p) > 0 && p[0] == 0x01 && connsCount > 1 {
+		streamsCopy := append([]*streamHolder{}, m.streams...)
+		m.mu.RUnlock()
 
-	// Prefer streams hosted on the same TURN server IP as the destination peer to ensure relay permissions align
-	var matchingServer []*streamHolder
-	if targetHost != "" {
-		for _, s := range m.streams {
-			if s.client != nil && s.client.GetServerIP() == targetHost {
-				matchingServer = append(matchingServer, s)
+		var firstErr error
+		var sentBytes int
+		for _, holder := range streamsCopy {
+			n, err := holder.conn.WriteTo(p, addr)
+			if err == nil && n > 0 {
+				sentBytes = n
+			} else if firstErr == nil {
+				firstErr = err
 			}
 		}
+		if sender != nil && addr != nil {
+			sender(p, addr.String())
+		}
+		if sentBytes > 0 {
+			return sentBytes, nil
+		}
+		return 0, firstErr
 	}
 
 	candidates := m.streams
-	if len(matchingServer) > 0 {
-		candidates = matchingServer
-	}
-
 	var holder *streamHolder
 	if addr != nil {
 		h := fnv.New32a()
@@ -343,7 +348,7 @@ func (m *MultiStreamPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	m.mu.RUnlock()
 
 	n, err := holder.conn.WriteTo(p, addr)
-	// If TURN write fails (or fallback needed), smoothly mirror via WebSocket signaling!
+	// If TURN write fails, smoothly mirror via WebSocket signaling!
 	if (err != nil || n == 0) && sender != nil && addr != nil {
 		sender(p, addr.String())
 		return len(p), nil

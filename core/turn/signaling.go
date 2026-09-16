@@ -235,17 +235,22 @@ func (s *SignalingClient) broadcastAnnounce() {
 		"sendTime": time.Now().UnixMilli(),
 	}
 
-	// Transmit data to each participant in the call via VK Call protocol
+	rawMsg, err := json.Marshal(msgObj)
+	if err != nil {
+		return
+	}
+	dataStr := string(rawMsg)
+
+	// 1. Send targeted transmit-data to each participant via VK Call protocol
 	for _, target := range targets {
 		transmitCmd := map[string]interface{}{
 			"command":         "transmit-data",
 			"sequence":        s.nextSeq(),
 			"participantId":   target.id,
 			"participantType": "USER",
-			"data":            msgObj,
+			"data":            dataStr,
 		}
-		raw, err := json.Marshal(transmitCmd)
-		if err == nil {
+		if raw, err := json.Marshal(transmitCmd); err == nil {
 			_ = conn.WriteMessage(websocket.TextMessage, raw)
 		}
 
@@ -257,12 +262,22 @@ func (s *SignalingClient) broadcastAnnounce() {
 					"id":   target.peerID,
 					"type": "WEB_SOCKET",
 				},
-				"data": msgObj,
+				"data": dataStr,
 			}
 			if rawP, err := json.Marshal(peerCmd); err == nil {
 				_ = conn.WriteMessage(websocket.TextMessage, rawP)
 			}
 		}
+	}
+
+	// 2. Also send broadcast custom-data to the conversation room
+	customCmd := map[string]interface{}{
+		"command":  "custom-data",
+		"sequence": s.nextSeq(),
+		"data":     dataStr,
+	}
+	if rawC, err := json.Marshal(customCmd); err == nil {
+		_ = conn.WriteMessage(websocket.TextMessage, rawC)
 	}
 
 	if len(targets) > 0 {
@@ -299,16 +314,21 @@ func (s *SignalingClient) SendFrame(data []byte, targetAddr string) {
 		"data":   hex.EncodeToString(data),
 	}
 
+	rawMsg, err := json.Marshal(msgObj)
+	if err != nil {
+		return
+	}
+	dataStr := string(rawMsg)
+
 	for _, target := range targets {
 		transmitCmd := map[string]interface{}{
 			"command":         "transmit-data",
 			"sequence":        s.nextSeq(),
 			"participantId":   target.id,
 			"participantType": "USER",
-			"data":            msgObj,
+			"data":            dataStr,
 		}
-		raw, err := json.Marshal(transmitCmd)
-		if err == nil {
+		if raw, err := json.Marshal(transmitCmd); err == nil {
 			_ = conn.WriteMessage(websocket.TextMessage, raw)
 		}
 	}
@@ -379,7 +399,7 @@ func (s *SignalingClient) handleMessage(msg []byte) {
 				log.Printf("[Signaling] Peer left call: participantId=%d", pid)
 			}
 		}
-	} else if notifType == "transmitted-data" || notifType == "data" {
+	} else if notifType == "transmitted-data" || notifType == "data" || notifType == "custom-data" || notifType == "send-data" {
 		// Data received from another peer via VK call signaling!
 		var dataMap map[string]interface{}
 		switch d := obj["data"].(type) {
@@ -395,7 +415,7 @@ func (s *SignalingClient) handleMessage(msg []byte) {
 		}
 	}
 
-	// Also handle legacy/direct message formats or any custom data payload
+	// Also handle direct message formats or stringified data payloads
 	if msgType == "turnp2p_announce" || msgType == "turnp2p_frame" {
 		s.handleTurnP2PData(obj)
 		return
@@ -406,6 +426,14 @@ func (s *SignalingClient) handleMessage(msg []byte) {
 		if dt, _ := dMap["type"].(string); strings.HasPrefix(dt, "turnp2p_") {
 			s.handleTurnP2PData(dMap)
 			return
+		}
+	} else if dStr, ok := obj["data"].(string); ok {
+		var dMap map[string]interface{}
+		if err := json.Unmarshal([]byte(dStr), &dMap); err == nil {
+			if dt, _ := dMap["type"].(string); strings.HasPrefix(dt, "turnp2p_") {
+				s.handleTurnP2PData(dMap)
+				return
+			}
 		}
 	}
 

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"log"
@@ -214,8 +215,10 @@ func (a *App) JoinNetwork(vkLink string, nickname string, customDomain string, o
 	a.status.StatusText = "Resolving VK Call..."
 	a.emitStatusChangeLocked()
 
+	cleanLink := turn.CleanVKLink(vkLink)
 	if obfKey == "" {
-		obfKey = a.GenerateRandomKey()
+		h := sha256.Sum256([]byte("turnp2p:" + cleanLink))
+		obfKey = hex.EncodeToString(h[:])
 	}
 
 	a.lastParams = lastJoinParams{
