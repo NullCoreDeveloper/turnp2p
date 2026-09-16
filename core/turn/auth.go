@@ -144,15 +144,18 @@ func FetchVKTurnCredentials(ctx context.Context, link string) (*Credentials, err
 
 		vkDelay(120, 200)
 
+		// VK calls API strictly requires https://vk.com/call/join/<hash> (rejects id.vk.com with error 9008)
+		fullJoinLink := fmt.Sprintf("https://vk.com/call/join/%s", cleanLink)
+
 		// Step 2: Call Preview
-		data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&fields=photo_200&access_token=%s", cleanLink, token1)
+		data = fmt.Sprintf("vk_join_link=%s&fields=photo_200&access_token=%s", fullJoinLink, token1)
 		_, _ = doRequest(data, "https://api.vk.ru/method/calls.getCallPreview?v=5.275&client_id="+creds.ClientID)
 
 		vkDelay(150, 250)
 
 		// Step 3: Get Anonymous Token for Call (with Captcha bypass)
 		var token2 string
-		data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s&access_token=%s", cleanLink, escapedName, token1)
+		data = fmt.Sprintf("vk_join_link=%s&name=%s&access_token=%s", fullJoinLink, escapedName, token1)
 
 		for attempt := 0; attempt < 3; attempt++ {
 			reqURL := fmt.Sprintf("https://api.vk.ru/method/calls.getAnonymousToken?v=5.275&client_id=%s", creds.ClientID)
@@ -185,9 +188,9 @@ func FetchVKTurnCredentials(ctx context.Context, link string) (*Credentials, err
 						break
 					}
 
-					// Retry with success_token
-					data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s&captcha_key=&captcha_sid=%s&is_sound_captcha=0&success_token=%s&captcha_ts=%s&access_token=%s",
-						cleanLink, escapedName, captchaChallenge.CaptchaSid, neturl.QueryEscape(solvedToken), captchaChallenge.CaptchaTs, token1)
+					// Retry with success_token and captcha_attempt
+					data = fmt.Sprintf("vk_join_link=%s&name=%s&captcha_key=&captcha_sid=%s&is_sound_captcha=0&success_token=%s&captcha_ts=%s&captcha_attempt=%s&access_token=%s",
+						fullJoinLink, escapedName, captchaChallenge.CaptchaSid, neturl.QueryEscape(solvedToken), captchaChallenge.CaptchaTs, captchaChallenge.CaptchaAttempt, token1)
 					continue
 				}
 
@@ -266,20 +269,40 @@ func FetchVKTurnCredentials(ctx context.Context, link string) (*Credentials, err
 			lastErr = fmt.Errorf("отсутствует список адресов в turn_server")
 			continue
 		}
-		urlStr, _ := urlsRaw[0].(string)
+		var serverAddrs []string
+		for _, raw := range urlsRaw {
+			if uStr, ok := raw.(string); ok && uStr != "" {
+				clean := strings.Split(uStr, "?")[0]
+				clean = strings.TrimPrefix(strings.TrimPrefix(clean, "turn:"), "turns:")
+				// Check for duplicates
+				duplicate := false
+				for _, sa := range serverAddrs {
+					if sa == clean {
+						duplicate = true
+						break
+					}
+				}
+				if !duplicate {
+					serverAddrs = append(serverAddrs, clean)
+				}
+			}
+		}
 
-		clean := strings.Split(urlStr, "?")[0]
-		address := strings.TrimPrefix(strings.TrimPrefix(clean, "turn:"), "turns:")
+		if len(serverAddrs) == 0 {
+			lastErr = fmt.Errorf("отсутствует список адресов в turn_server")
+			continue
+		}
 
 		wsEndpoint, _ := resp4["endpoint"].(string)
 
 		result := &Credentials{
-			Username:   user,
-			Password:   pass,
-			ServerAddr: address,
-			WsEndpoint: wsEndpoint,
-			ExpiresAt:  time.Now().Add(10 * time.Minute),
-			Link:       cleanLink,
+			Username:    user,
+			Password:    pass,
+			ServerAddr:  serverAddrs[0],
+			ServerAddrs: serverAddrs,
+			WsEndpoint:  wsEndpoint,
+			ExpiresAt:   time.Now().Add(10 * time.Minute),
+			Link:        cleanLink,
 		}
 
 		credsCacheMu.Lock()

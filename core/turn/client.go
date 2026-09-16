@@ -38,6 +38,7 @@ type PionClient struct {
 	relayConn  net.PacketConn
 	rawConn    net.PacketConn
 	relayAddr  net.Addr
+	serverIP   string
 	obfuscator obf.Obfuscator
 	mu         sync.RWMutex
 	closed     bool
@@ -129,6 +130,7 @@ func (c *PionClient) Connect(ctx context.Context, creds *Credentials, obfKey str
 	}
 
 	c.relayAddr = relayConn.LocalAddr()
+	c.serverIP = turnUDPAddr.IP.String()
 
 	// 5. Initialize rtpopus3 obfuscator
 	obfuscator, err := obf.NewRTPOpus3(obfKey)
@@ -182,4 +184,11 @@ func (c *PionClient) GetRelayAddress() net.Addr {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.relayAddr
+}
+
+// GetServerIP returns the IP of the connected TURN server.
+func (c *PionClient) GetServerIP() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.serverIP
 }

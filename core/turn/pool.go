@@ -3,6 +3,7 @@ package turn
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"math/rand"
 	"net"
@@ -240,8 +241,15 @@ func (m *MultiStreamPacketConn) replenishStreams() {
 				}
 			}
 
+			serverList := activeCreds.ServerAddrs
+			if len(serverList) == 0 {
+				serverList = []string{activeCreds.ServerAddr}
+			}
+			streamCreds := *activeCreds
+			streamCreds.ServerAddr = serverList[(currentCount+idx)%len(serverList)]
+
 			client := NewClient()
-			conn, err := client.Connect(m.ctx, activeCreds, obfKey)
+			conn, err := client.Connect(m.ctx, &streamCreds, obfKey)
 			if err != nil {
 				log.Printf("[Stream Pool] Failed to replenish stream: %v", err)
 				return
@@ -302,14 +310,40 @@ func (m *MultiStreamPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 		return 0, net.ErrClosed
 	}
 
-	// Round-robin striping across all currently available active TURN streams
-	idx := int(m.roundRobin.Add(1) % uint64(connsCount))
-	holder := m.streams[idx]
+	targetHost := ""
+	if addr != nil {
+		targetHost, _, _ = net.SplitHostPort(addr.String())
+	}
+
+	// Prefer streams hosted on the same TURN server IP as the destination peer to ensure relay permissions align
+	var matchingServer []*streamHolder
+	if targetHost != "" {
+		for _, s := range m.streams {
+			if s.client != nil && s.client.GetServerIP() == targetHost {
+				matchingServer = append(matchingServer, s)
+			}
+		}
+	}
+
+	candidates := m.streams
+	if len(matchingServer) > 0 {
+		candidates = matchingServer
+	}
+
+	var holder *streamHolder
+	if addr != nil {
+		h := fnv.New32a()
+		h.Write([]byte(addr.String()))
+		idx := int(h.Sum32() % uint32(len(candidates)))
+		holder = candidates[idx]
+	} else {
+		idx := int(m.roundRobin.Add(1) % uint64(len(candidates)))
+		holder = candidates[idx]
+	}
 	m.mu.RUnlock()
 
 	n, err := holder.conn.WriteTo(p, addr)
-	// If TURN write fails (e.g. CreatePermission 400 when relaying to same TURN server IP),
-	// smoothly fallback and mirror via WebSocket signaling!
+	// If TURN write fails (or fallback needed), smoothly mirror via WebSocket signaling!
 	if (err != nil || n == 0) && sender != nil && addr != nil {
 		sender(p, addr.String())
 		return len(p), nil
@@ -358,7 +392,7 @@ func (m *MultiStreamPacketConn) SetDeadline(t time.Time) error      { return nil
 func (m *MultiStreamPacketConn) SetReadDeadline(t time.Time) error  { return nil }
 func (m *MultiStreamPacketConn) SetWriteDeadline(t time.Time) error { return nil }
 
-// AllocateMultiStreamClient creates N parallel TURN allocations with rtpopus3 obfuscation and starts background replenishment.
+// AllocateMultiStreamClient creates N parallel TURN allocations across available TURN server IPs with rtpopus3 obfuscation.
 func AllocateMultiStreamClient(ctx context.Context, creds *Credentials, obfKey string, streamsCount int) (*MultiStreamPacketConn, error) {
 	if streamsCount <= 0 {
 		streamsCount = 3
@@ -367,7 +401,12 @@ func AllocateMultiStreamClient(ctx context.Context, creds *Credentials, obfKey s
 		streamsCount = 20
 	}
 
-	log.Printf("[TURN MultiStream] Initializing %d parallel TURN streams with rtpopus3...", streamsCount)
+	serverList := creds.ServerAddrs
+	if len(serverList) == 0 {
+		serverList = []string{creds.ServerAddr}
+	}
+
+	log.Printf("[TURN MultiStream] Initializing %d parallel TURN streams across %d servers (%v) with rtpopus3...", streamsCount, len(serverList), serverList)
 
 	holders := make([]*streamHolder, 0, streamsCount)
 	var mu sync.Mutex
@@ -382,10 +421,13 @@ func AllocateMultiStreamClient(ctx context.Context, creds *Credentials, obfKey s
 			// Initial jitter
 			time.Sleep(time.Duration(streamID*70) * time.Millisecond)
 
+			streamCreds := *creds
+			streamCreds.ServerAddr = serverList[streamID%len(serverList)]
+
 			const maxAttempts = 3
 			for attempt := 1; attempt <= maxAttempts; attempt++ {
 				client := NewClient()
-				conn, err := client.Connect(ctx, creds, obfKey)
+				conn, err := client.Connect(ctx, &streamCreds, obfKey)
 				if err == nil {
 					mu.Lock()
 					holders = append(holders, &streamHolder{
@@ -394,11 +436,11 @@ func AllocateMultiStreamClient(ctx context.Context, creds *Credentials, obfKey s
 						client: client,
 					})
 					mu.Unlock()
-					log.Printf("[TURN MultiStream] Stream %d/%d connected successfully (attempt %d)", streamID+1, streamsCount, attempt)
+					log.Printf("[TURN MultiStream] Stream %d/%d (server: %s) connected successfully (attempt %d)", streamID+1, streamsCount, streamCreds.ServerAddr, attempt)
 					return
 				}
 
-				log.Printf("[TURN MultiStream] Stream %d attempt %d/%d failed: %v", streamID+1, attempt, maxAttempts, err)
+				log.Printf("[TURN MultiStream] Stream %d (server: %s) attempt %d/%d failed: %v", streamID+1, streamCreds.ServerAddr, attempt, maxAttempts, err)
 				if attempt < maxAttempts {
 					time.Sleep(time.Duration(200*attempt) * time.Millisecond)
 				} else {

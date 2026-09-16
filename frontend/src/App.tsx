@@ -159,6 +159,26 @@ export function App() {
     }
   }, []);
 
+  // Periodic background sync with core to guarantee 0% chance of UI/Core desync
+  useEffect(() => {
+    if (!isConnected) return;
+
+    const syncPeers = async () => {
+      if (window.go?.main?.App?.GetPeers) {
+        try {
+          const currentPeers = await window.go.main.App.GetPeers();
+          if (currentPeers) {
+            setPeers(currentPeers);
+          }
+        } catch (_) {}
+      }
+    };
+
+    syncPeers();
+    const interval = setInterval(syncPeers, 2000);
+    return () => clearInterval(interval);
+  }, [isConnected]);
+
   const generateNewKey = async () => {
     if (window.go?.main?.App?.GenerateRandomKey) {
       const key = await window.go.main.App.GenerateRandomKey();

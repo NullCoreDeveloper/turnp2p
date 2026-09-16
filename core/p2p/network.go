@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -638,17 +639,19 @@ func (n *MeshNode) forwardToLocalPort(stream *VirtualStream, port int) {
 	}
 	defer localConn.Close()
 
-	errChan := make(chan error, 2)
+	done := make(chan struct{}, 2)
 	go func() {
-		_, err := io.Copy(localConn, stream)
-		errChan <- err
+		_, _ = io.Copy(localConn, stream)
+		done <- struct{}{}
 	}()
 	go func() {
-		_, err := io.Copy(stream, localConn)
-		errChan <- err
+		_, _ = io.Copy(stream, localConn)
+		done <- struct{}{}
 	}()
 
-	<-errChan
+	<-done
+	// Flush window to let outgoing response frames transit the network before closing stream
+	time.Sleep(100 * time.Millisecond)
 }
 
 func (n *MeshNode) handleConnectAck(payload []byte) {
@@ -692,15 +695,19 @@ func (n *MeshNode) handleClose(payload []byte) {
 	}
 	streamID := binary.BigEndian.Uint32(payload[0:4])
 
-	n.mu.Lock()
+	n.mu.RLock()
 	stream, exists := n.streams[streamID]
-	if exists {
-		delete(n.streams, streamID)
-	}
-	n.mu.Unlock()
+	n.mu.RUnlock()
 
 	if exists {
 		stream.closeRemote()
+		// Retain stream briefly in map to allow any late arriving FrameData to be buffered
+		go func() {
+			time.Sleep(2 * time.Second)
+			n.mu.Lock()
+			delete(n.streams, streamID)
+			n.mu.Unlock()
+		}()
 	}
 }
 
@@ -709,68 +716,86 @@ type VirtualStream struct {
 	id        uint32
 	node      *MeshNode
 	peerAddr  net.Addr
-	readBuf   chan []byte
 	connected chan struct{}
-	closed    atomic.Bool
-	readMu    sync.Mutex
-	leftover  []byte
+
+	mu           sync.Mutex
+	cond         *sync.Cond
+	buffer       [][]byte
+	remoteClosed bool
+	localClosed  bool
+	readDeadline time.Time
+	timer        *time.Timer
 }
 
 func newVirtualStream(id uint32, node *MeshNode, peerAddr net.Addr) *VirtualStream {
-	return &VirtualStream{
+	s := &VirtualStream{
 		id:        id,
 		node:      node,
 		peerAddr:  peerAddr,
-		readBuf:   make(chan []byte, 128),
 		connected: make(chan struct{}),
 	}
+	s.cond = sync.NewCond(&s.mu)
+	return s
 }
 
 func (s *VirtualStream) incomingData(data []byte) {
-	if s.closed.Load() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.localClosed {
 		return
 	}
 	b := make([]byte, len(data))
 	copy(b, data)
-	select {
-	case s.readBuf <- b:
-	default:
-	}
+	s.buffer = append(s.buffer, b)
+	s.cond.Signal()
 }
 
 func (s *VirtualStream) closeRemote() {
-	if s.closed.Swap(true) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.remoteClosed {
 		return
 	}
-	close(s.readBuf)
+	s.remoteClosed = true
+	s.cond.Broadcast()
 }
 
 func (s *VirtualStream) Read(b []byte) (n int, err error) {
-	s.readMu.Lock()
-	defer s.readMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	if len(s.leftover) > 0 {
-		n = copy(b, s.leftover)
-		s.leftover = s.leftover[n:]
-		return n, nil
+	for len(s.buffer) == 0 {
+		if s.localClosed {
+			return 0, io.ErrClosedPipe
+		}
+		if s.remoteClosed {
+			return 0, io.EOF
+		}
+		if !s.readDeadline.IsZero() && time.Now().After(s.readDeadline) {
+			return 0, os.ErrDeadlineExceeded
+		}
+		s.cond.Wait()
 	}
 
-	chunk, ok := <-s.readBuf
-	if !ok {
-		return 0, io.EOF
-	}
-
+	chunk := s.buffer[0]
 	n = copy(b, chunk)
 	if n < len(chunk) {
-		s.leftover = chunk[n:]
+		s.buffer[0] = chunk[n:]
+	} else {
+		s.buffer = s.buffer[1:]
 	}
 	return n, nil
 }
 
 func (s *VirtualStream) Write(b []byte) (n int, err error) {
-	if s.closed.Load() {
+	s.mu.Lock()
+	if s.localClosed {
+		s.mu.Unlock()
 		return 0, io.ErrClosedPipe
 	}
+	s.mu.Unlock()
 
 	frame := make([]byte, 5+len(b))
 	frame[0] = FrameData
@@ -785,28 +810,60 @@ func (s *VirtualStream) Write(b []byte) (n int, err error) {
 }
 
 func (s *VirtualStream) Close() error {
-	if s.closed.Swap(true) {
+	s.mu.Lock()
+	if s.localClosed {
+		s.mu.Unlock()
 		return nil
 	}
+	s.localClosed = true
+	if s.timer != nil {
+		s.timer.Stop()
+	}
+	s.cond.Broadcast()
+	s.mu.Unlock()
 
 	frame := make([]byte, 5)
 	frame[0] = FrameClose
 	binary.BigEndian.PutUint32(frame[1:5], s.id)
 	s.node.packetConn.WriteTo(frame, s.peerAddr)
 
-	s.node.mu.Lock()
-	delete(s.node.streams, s.id)
-	s.node.mu.Unlock()
+	go func() {
+		time.Sleep(2 * time.Second)
+		s.node.mu.Lock()
+		delete(s.node.streams, s.id)
+		s.node.mu.Unlock()
+	}()
 
-	close(s.readBuf)
 	return nil
 }
 
 func (s *VirtualStream) LocalAddr() net.Addr                { return s.node.relayAddr }
 func (s *VirtualStream) RemoteAddr() net.Addr               { return s.peerAddr }
-func (s *VirtualStream) SetDeadline(t time.Time) error      { return nil }
-func (s *VirtualStream) SetReadDeadline(t time.Time) error  { return nil }
+func (s *VirtualStream) SetDeadline(t time.Time) error      { return s.SetReadDeadline(t) }
 func (s *VirtualStream) SetWriteDeadline(t time.Time) error { return nil }
+
+func (s *VirtualStream) SetReadDeadline(t time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.readDeadline = t
+	if s.timer != nil {
+		s.timer.Stop()
+		s.timer = nil
+	}
+	if !t.IsZero() {
+		dur := time.Until(t)
+		if dur <= 0 {
+			s.cond.Broadcast()
+			return nil
+		}
+		s.timer = time.AfterFunc(dur, func() {
+			s.mu.Lock()
+			s.cond.Broadcast()
+			s.mu.Unlock()
+		})
+	}
+	return nil
+}
 
 // VirtualListener listens for virtual streams incoming to a specific port.
 type VirtualListener struct {
