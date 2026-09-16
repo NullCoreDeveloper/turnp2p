@@ -230,11 +230,13 @@ func (s *SignalingClient) broadcastAnnounce() {
 	msgObj := map[string]interface{}{
 		"type":     "turnp2p_announce",
 		"room":     s.roomHash,
-		"convId":   s.convID,
 		"data":     string(payload),
 		"relay":    info.RelayAddr,
 		"sendTime": time.Now().UnixMilli(),
 	}
+	
+	rawMsg, _ := json.Marshal(msgObj)
+	dataStr := base64.StdEncoding.EncodeToString(rawMsg)
 
 	// Send transmit-data to each participant via VK Call protocol
 	for _, target := range targets {
@@ -246,7 +248,7 @@ func (s *SignalingClient) broadcastAnnounce() {
 					"id":   target.peerID,
 					"type": "WEB_SOCKET",
 				},
-				"data": msgObj,
+				"data": dataStr,
 			}
 			if rawP, err := json.Marshal(peerCmd); err == nil {
 				_ = s.writeMsg(websocket.TextMessage, rawP)
@@ -257,7 +259,7 @@ func (s *SignalingClient) broadcastAnnounce() {
 				"sequence":        s.nextSeq(),
 				"participantId":   target.id,
 				"participantType": target.pType,
-				"data":            msgObj,
+				"data":            dataStr,
 			}
 			if raw, err := json.Marshal(transmitCmd); err == nil {
 				_ = s.writeMsg(websocket.TextMessage, raw)
@@ -293,11 +295,13 @@ func (s *SignalingClient) SendFrame(data []byte, targetAddr string) {
 	msgObj := map[string]interface{}{
 		"type":   "turnp2p_frame",
 		"room":   s.roomHash,
-		"convId": s.convID,
 		"relay":  info.RelayAddr,
 		"target": targetAddr,
 		"data":   hex.EncodeToString(data),
 	}
+
+	rawMsg, _ := json.Marshal(msgObj)
+	dataStr := base64.StdEncoding.EncodeToString(rawMsg)
 
 	for _, target := range targets {
 		if target.peerID > 0 {
@@ -308,7 +312,7 @@ func (s *SignalingClient) SendFrame(data []byte, targetAddr string) {
 					"id":   target.peerID,
 					"type": "WEB_SOCKET",
 				},
-				"data": msgObj,
+				"data": dataStr,
 			}
 			if rawP, err := json.Marshal(peerCmd); err == nil {
 				log.Printf("[Signaling] >>> SendFrame %d bytes to peer %d via WS", len(data), target.peerID)
@@ -320,7 +324,7 @@ func (s *SignalingClient) SendFrame(data []byte, targetAddr string) {
 				"sequence":        s.nextSeq(),
 				"participantId":   target.id,
 				"participantType": "USER",
-				"data":            msgObj,
+				"data":            dataStr,
 			}
 			if raw, err := json.Marshal(transmitCmd); err == nil {
 				log.Printf("[Signaling] >>> SendFrame %d bytes to participant %d via WS", len(data), target.id)
