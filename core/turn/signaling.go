@@ -241,19 +241,8 @@ func (s *SignalingClient) broadcastAnnounce() {
 	}
 	dataStr := string(rawMsg)
 
-	// 1. Send targeted transmit-data to each participant via VK Call protocol
+	// Send transmit-data to each participant via VK Call protocol
 	for _, target := range targets {
-		transmitCmd := map[string]interface{}{
-			"command":         "transmit-data",
-			"sequence":        s.nextSeq(),
-			"participantId":   target.id,
-			"participantType": "USER",
-			"data":            dataStr,
-		}
-		if raw, err := json.Marshal(transmitCmd); err == nil {
-			_ = s.writeMsg(websocket.TextMessage, raw)
-		}
-
 		if target.peerID > 0 {
 			peerCmd := map[string]interface{}{
 				"command":  "transmit-data",
@@ -267,17 +256,18 @@ func (s *SignalingClient) broadcastAnnounce() {
 			if rawP, err := json.Marshal(peerCmd); err == nil {
 				_ = s.writeMsg(websocket.TextMessage, rawP)
 			}
+		} else {
+			transmitCmd := map[string]interface{}{
+				"command":         "transmit-data",
+				"sequence":        s.nextSeq(),
+				"participantId":   target.id,
+				"participantType": target.pType,
+				"data":            dataStr,
+			}
+			if raw, err := json.Marshal(transmitCmd); err == nil {
+				_ = s.writeMsg(websocket.TextMessage, raw)
+			}
 		}
-	}
-
-	// 2. Also send broadcast custom-data to the conversation room
-	customCmd := map[string]interface{}{
-		"command":  "custom-data",
-		"sequence": s.nextSeq(),
-		"data":     dataStr,
-	}
-	if rawC, err := json.Marshal(customCmd); err == nil {
-		_ = s.writeMsg(websocket.TextMessage, rawC)
 	}
 
 	if len(targets) > 0 {
@@ -507,7 +497,7 @@ func (s *SignalingClient) handleTurnP2PData(obj map[string]interface{}) {
 		cb := s.onPeerAddr
 		s.mu.Unlock()
 		if cb != nil {
-			cb(relay)
+			go cb(relay)
 		}
 	case "turnp2p_frame":
 		hexData, _ := obj["data"].(string)
@@ -520,7 +510,7 @@ func (s *SignalingClient) handleTurnP2PData(obj map[string]interface{}) {
 				s.mu.Unlock()
 				if fCb != nil {
 					log.Printf("[Signaling] Injecting %d bytes from %s into packet conn", len(raw), relay)
-					fCb(raw, relay)
+					go fCb(raw, relay)
 				}
 			} else {
 				log.Printf("[Signaling] <<< turnp2p_frame hex decode error: %v", err)

@@ -105,28 +105,6 @@ func (m *MultiStreamPacketConn) AddStream(client *PionClient, conn net.PacketCon
 	}
 }
 
-// EnsurePermission creates a TURN permission for the given IP on all active TURN streams.
-// Must be called before sending any packets to a new peer relay address.
-func (m *MultiStreamPacketConn) EnsurePermission(ip net.IP) {
-	m.mu.RLock()
-	streamsCopy := append([]*streamHolder{}, m.streams...)
-	m.mu.RUnlock()
-
-	addr := &net.UDPAddr{IP: ip, Port: 0}
-	for _, holder := range streamsCopy {
-		if holder.client != nil {
-			holder.client.mu.RLock()
-			turnClient := holder.client.client
-			holder.client.mu.RUnlock()
-			if turnClient != nil {
-				if err := turnClient.CreatePermission(addr); err != nil {
-					log.Printf("[Stream Pool] CreatePermission(%s) for stream %d: %v", ip.String(), holder.id, err)
-				}
-			}
-		}
-	}
-	log.Printf("[Stream Pool] Ensured TURN permission for peer IP %s on %d streams", ip.String(), len(streamsCopy))
-}
 
 // removeStream removes a failed/dead stream from the active pool.
 func (m *MultiStreamPacketConn) removeStream(holder *streamHolder, reason error) {

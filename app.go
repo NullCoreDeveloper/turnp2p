@@ -319,10 +319,6 @@ func (a *App) JoinNetwork(vkLink string, nickname string, customDomain string, o
 		}
 		sig.Start(context.Background(), localInfo, func(peerRelayAddr string) {
 			log.Printf("[App] Discovered peer relay via signaling: %s, connecting...", peerRelayAddr)
-			// Ensure TURN permission for peer's IP on ALL active streams before sending any packets
-			if peerUDPAddr, err := net.ResolveUDPAddr("udp", peerRelayAddr); err == nil && peerUDPAddr.IP != nil {
-				bondedPacketConn.EnsurePermission(peerUDPAddr.IP)
-			}
 			_ = node.ConnectPeer(peerRelayAddr)
 		}, func(rawPacket []byte, fromRelay string) {
 			fakeAddr, _ := net.ResolveUDPAddr("udp", fromRelay)
