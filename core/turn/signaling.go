@@ -230,30 +230,6 @@ func (s *SignalingClient) broadcastAnnounce() {
 		if err == nil {
 			_ = conn.WriteMessage(websocket.TextMessage, raw)
 		}
-
-		// Also try with stringified data payload
-		rawPayload, _ := json.Marshal(msgObj)
-		transmitCmdStr := map[string]interface{}{
-			"command":         "transmit-data",
-			"sequence":        s.nextSeq(),
-			"participantId":   target.id,
-			"participantType": "USER",
-			"data":            string(rawPayload),
-		}
-		if rawS, err := json.Marshal(transmitCmdStr); err == nil {
-			_ = conn.WriteMessage(websocket.TextMessage, rawS)
-		}
-	}
-
-	// Also send a broadcast transmit-data if supported by room
-	bcastCmd := map[string]interface{}{
-		"command":   "transmit-data",
-		"sequence":  s.nextSeq(),
-		"broadcast": true,
-		"data":      msgObj,
-	}
-	if rawB, err := json.Marshal(bcastCmd); err == nil {
-		_ = conn.WriteMessage(websocket.TextMessage, rawB)
 	}
 
 	if len(targets) > 0 {
@@ -337,7 +313,8 @@ func (s *SignalingClient) handleMessage(msg []byte) {
 			if pType == "" {
 				pType = "ANONYMOUS_USER"
 			}
-			if pid > 0 && pid != s.myInternalID {
+			isSelf := fmt.Sprintf("%d", pid) == s.myUserID || (s.myInternalID > 0 && pid == s.myInternalID)
+			if pid > 0 && !isSelf {
 				s.mu.Lock()
 				s.participants[pid] = pType
 				s.mu.Unlock()
@@ -415,8 +392,12 @@ func (s *SignalingClient) updateParticipantsFromConversation(conv map[string]int
 			pType = "ANONYMOUS_USER"
 		}
 
-		// Check if this participant is myself
+		// Check if this participant is myself (match URL userId directly)
 		isSelf := false
+		if fmt.Sprintf("%d", pid) == s.myUserID || (s.myInternalID > 0 && pid == s.myInternalID) {
+			s.myInternalID = pid
+			isSelf = true
+		}
 		if ext, ok := pmap["externalId"].(map[string]interface{}); ok {
 			extID := fmt.Sprintf("%v", ext["id"])
 			if extID != "" && extID == s.myUserID {
