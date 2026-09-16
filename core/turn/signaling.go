@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	neturl "net/url"
 	"strconv"
@@ -41,12 +42,25 @@ type SignalingClient struct {
 	peerIDs      map[int64]int64  // key: participantId -> peerId
 	seq          int64
 	conn         *websocket.Conn
+	writeMu      sync.Mutex
 	mu           sync.Mutex
 	onPeerAddr   func(relayAddr string)
 	onFrame      func(data []byte, fromRelay string)
 	localInfo    SignalingPeerInfo
 	ctx          context.Context
 	cancel       context.CancelFunc
+}
+
+func (s *SignalingClient) writeMsg(msgType int, data []byte) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	s.mu.Lock()
+	conn := s.conn
+	s.mu.Unlock()
+	if conn == nil {
+		return net.ErrClosed
+	}
+	return conn.WriteMessage(msgType, data)
 }
 
 // NewSignalingClient creates a new VK Call signaling channel client.
@@ -153,20 +167,6 @@ func (s *SignalingClient) runLoop() {
 
 		log.Printf("[Signaling] Connected to VK Call WebSocket channel (%s)", s.localInfo.RelayAddr)
 
-		// 1. Enable data channel on VK Calls server so transmit-data is permitted
-		mediaCmd := map[string]interface{}{
-			"command":  "update-media-settings",
-			"sequence": s.nextSeq(),
-			"mediaSettings": map[string]interface{}{
-				"isDataEnabled":  true,
-				"isAudioEnabled": true,
-				"isVideoEnabled": false,
-			},
-		}
-		if rawM, err := json.Marshal(mediaCmd); err == nil {
-			_ = conn.WriteMessage(websocket.TextMessage, rawM)
-		}
-
 		broadcastTicker := time.NewTicker(2 * time.Second)
 		readDone := make(chan struct{})
 
@@ -251,7 +251,7 @@ func (s *SignalingClient) broadcastAnnounce() {
 			"data":            dataStr,
 		}
 		if raw, err := json.Marshal(transmitCmd); err == nil {
-			_ = conn.WriteMessage(websocket.TextMessage, raw)
+			_ = s.writeMsg(websocket.TextMessage, raw)
 		}
 
 		if target.peerID > 0 {
@@ -265,7 +265,7 @@ func (s *SignalingClient) broadcastAnnounce() {
 				"data": dataStr,
 			}
 			if rawP, err := json.Marshal(peerCmd); err == nil {
-				_ = conn.WriteMessage(websocket.TextMessage, rawP)
+				_ = s.writeMsg(websocket.TextMessage, rawP)
 			}
 		}
 	}
@@ -277,7 +277,7 @@ func (s *SignalingClient) broadcastAnnounce() {
 		"data":     dataStr,
 	}
 	if rawC, err := json.Marshal(customCmd); err == nil {
-		_ = conn.WriteMessage(websocket.TextMessage, rawC)
+		_ = s.writeMsg(websocket.TextMessage, rawC)
 	}
 
 	if len(targets) > 0 {
@@ -329,7 +329,7 @@ func (s *SignalingClient) SendFrame(data []byte, targetAddr string) {
 			"data":            dataStr,
 		}
 		if raw, err := json.Marshal(transmitCmd); err == nil {
-			_ = conn.WriteMessage(websocket.TextMessage, raw)
+			_ = s.writeMsg(websocket.TextMessage, raw)
 		}
 	}
 }
@@ -337,12 +337,7 @@ func (s *SignalingClient) SendFrame(data []byte, targetAddr string) {
 func (s *SignalingClient) handleMessage(msg []byte) {
 	// Handle ping/pong heartbeat from VK server
 	if string(msg) == "ping" {
-		s.mu.Lock()
-		conn := s.conn
-		s.mu.Unlock()
-		if conn != nil {
-			_ = conn.WriteMessage(websocket.TextMessage, []byte("pong"))
-		}
+		_ = s.writeMsg(websocket.TextMessage, []byte("pong"))
 		return
 	}
 
