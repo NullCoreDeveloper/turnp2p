@@ -3,6 +3,7 @@ package turn
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -239,7 +240,7 @@ func (s *SignalingClient) broadcastAnnounce() {
 	if err != nil {
 		return
 	}
-	dataStr := string(rawMsg)
+	dataStr := base64.StdEncoding.EncodeToString(rawMsg)
 
 	// Send transmit-data to each participant via VK Call protocol
 	for _, target := range targets {
@@ -308,7 +309,7 @@ func (s *SignalingClient) SendFrame(data []byte, targetAddr string) {
 	if err != nil {
 		return
 	}
-	dataStr := string(rawMsg)
+	dataStr := base64.StdEncoding.EncodeToString(rawMsg)
 
 	for _, target := range targets {
 		if target.peerID > 0 {
@@ -411,7 +412,11 @@ func (s *SignalingClient) handleMessage(msg []byte) {
 		case map[string]interface{}:
 			dataMap = d
 		case string:
-			_ = json.Unmarshal([]byte(d), &dataMap)
+			if dec, err := base64.StdEncoding.DecodeString(d); err == nil {
+				_ = json.Unmarshal(dec, &dataMap)
+			} else {
+				_ = json.Unmarshal([]byte(d), &dataMap)
+			}
 		}
 
 		if dataMap != nil {
@@ -434,11 +439,14 @@ func (s *SignalingClient) handleMessage(msg []byte) {
 		}
 	} else if dStr, ok := obj["data"].(string); ok {
 		var dMap map[string]interface{}
-		if err := json.Unmarshal([]byte(dStr), &dMap); err == nil {
-			if dt, _ := dMap["type"].(string); strings.HasPrefix(dt, "turnp2p_") {
-				s.handleTurnP2PData(dMap)
-				return
-			}
+		if dec, err := base64.StdEncoding.DecodeString(dStr); err == nil {
+			_ = json.Unmarshal(dec, &dMap)
+		} else {
+			_ = json.Unmarshal([]byte(dStr), &dMap)
+		}
+		if dt, _ := dMap["type"].(string); strings.HasPrefix(dt, "turnp2p_") {
+			s.handleTurnP2PData(dMap)
+			return
 		}
 	}
 
