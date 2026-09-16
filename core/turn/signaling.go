@@ -311,16 +311,32 @@ func (s *SignalingClient) SendFrame(data []byte, targetAddr string) {
 	dataStr := string(rawMsg)
 
 	for _, target := range targets {
-		transmitCmd := map[string]interface{}{
-			"command":         "transmit-data",
-			"sequence":        s.nextSeq(),
-			"participantId":   target.id,
-			"participantType": "USER",
-			"data":            dataStr,
-		}
-		if raw, err := json.Marshal(transmitCmd); err == nil {
-			log.Printf("[Signaling] >>> SendFrame %d bytes to participant %d via WS", len(data), target.id)
-			_ = s.writeMsg(websocket.TextMessage, raw)
+		if target.peerID > 0 {
+			peerCmd := map[string]interface{}{
+				"command":  "transmit-data",
+				"sequence": s.nextSeq(),
+				"peerId": map[string]interface{}{
+					"id":   target.peerID,
+					"type": "WEB_SOCKET",
+				},
+				"data": dataStr,
+			}
+			if rawP, err := json.Marshal(peerCmd); err == nil {
+				log.Printf("[Signaling] >>> SendFrame %d bytes to peer %d via WS", len(data), target.peerID)
+				_ = s.writeMsg(websocket.TextMessage, rawP)
+			}
+		} else {
+			transmitCmd := map[string]interface{}{
+				"command":         "transmit-data",
+				"sequence":        s.nextSeq(),
+				"participantId":   target.id,
+				"participantType": "USER",
+				"data":            dataStr,
+			}
+			if raw, err := json.Marshal(transmitCmd); err == nil {
+				log.Printf("[Signaling] >>> SendFrame %d bytes to participant %d via WS", len(data), target.id)
+				_ = s.writeMsg(websocket.TextMessage, raw)
+			}
 		}
 	}
 }
@@ -349,9 +365,12 @@ func (s *SignalingClient) handleMessage(msg []byte) {
 	if notifType == "participant-joined" {
 		if part, ok := obj["participant"].(map[string]interface{}); ok {
 			pid := parseParticipantID(part["id"])
-			pType, _ := part["type"].(string)
+			pType, _ := part["idType"].(string)
 			if pType == "" {
-				pType = "ANONYMOUS_USER"
+				pType, _ = part["type"].(string)
+			}
+			if pType == "" || pType == "ANONYMOUS_USER" {
+				pType = "USER"
 			}
 			isSelf := fmt.Sprintf("%d", pid) == s.myUserID || (s.myInternalID > 0 && pid == s.myInternalID)
 			if pid > 0 && !isSelf {
@@ -448,9 +467,12 @@ func (s *SignalingClient) updateParticipantsFromConversation(conv map[string]int
 		if pid == 0 {
 			continue
 		}
-		pType, _ := pmap["type"].(string)
+		pType, _ := pmap["idType"].(string)
 		if pType == "" {
-			pType = "ANONYMOUS_USER"
+			pType, _ = pmap["type"].(string)
+		}
+		if pType == "" || pType == "ANONYMOUS_USER" {
+			pType = "USER"
 		}
 
 		// Check if this participant is myself (match URL userId directly)
