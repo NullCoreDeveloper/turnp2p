@@ -69,7 +69,7 @@ func NewApp() *App {
 	return &App{
 		proxyMgr:      proxy.NewManager(nil),
 		hostsMgr:      hosts.NewManager(""),
-		networkMode:   "userspace",
+		networkMode:   "tun",
 		windowVisible: true,
 		status: ConnectionStatus{
 			Connected:    false,
@@ -78,8 +78,8 @@ func NewApp() *App {
 			FirewallMode: p2p.FirewallModeWhitelist,
 			SharedPorts:  []int{},
 			StreamsCount: 10,
-			NetworkMode:  "userspace",
-			HostsSync:    false,
+			NetworkMode:  "tun",
+			HostsSync:    true,
 		},
 	}
 }
@@ -184,16 +184,13 @@ func (a *App) emitStatusChange() {
 	}()
 }
 
-// SetNetworkMode switches between "userspace" and "tun" modes.
+// SetNetworkMode sets the networking mode (always "tun").
 func (a *App) SetNetworkMode(mode string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	if mode != "userspace" && mode != "tun" {
-		mode = "userspace"
-	}
-	a.networkMode = mode
-	a.status.NetworkMode = mode
+	a.networkMode = "tun"
+	a.status.NetworkMode = "tun"
 
 	a.emitStatusChangeLocked()
 	return nil
@@ -267,23 +264,14 @@ func (a *App) JoinNetwork(vkLink string, nickname string, customDomain string, o
 	node := p2p.NewMeshNode(nickname, customDomain, "")
 
 	node.SetPeerCallback(func(peers []p2p.Peer) {
-		// Sync peer domains to OS hosts file
+		// Sync peer domains to OS hosts file with real virtual IPs (10.42.X.Y)
 		hostsMap := make(map[string]string)
 		for _, p := range peers {
 			if p.Domain != "" {
-				if a.networkMode == "tun" {
-					hostsMap[p.Domain] = p.VirtualIP
-				} else {
-					hostsMap[p.Domain] = p2p.ToLoopbackIP(p.VirtualIP)
-				}
+				hostsMap[p.Domain] = p.VirtualIP
 			}
 		}
 		_ = a.hostsMgr.Sync(hostsMap)
-
-		// In Userspace mode, automatically forward open ports of discovered peers in background
-		if a.networkMode != "tun" {
-			a.autoSyncProxyRules(peers)
-		}
 
 		if a.ctx != nil {
 			wailsRuntime.EventsEmit(a.ctx, "peers_updated", peers)
@@ -355,25 +343,33 @@ func (a *App) JoinNetwork(vkLink string, nickname string, customDomain string, o
 		a.sigClient = sig
 	}
 
-	// 5. If TUN mode requested, attempt to create and start TUN Device
-	activeMode := a.networkMode
-	if activeMode == "tun" {
-		tunDev, tunErr := tun.OpenDevice("turnp2p0", vIP)
-		if tunErr != nil {
-			log.Printf("[App] TUN mode creation failed (%v). Falling back to Userspace mode", tunErr)
-			activeMode = "userspace"
-		} else {
-			router := tun.NewRouter(tunDev, node)
-			if err := router.Start(context.Background()); err != nil {
-				log.Printf("[App] TUN router start failed (%v). Falling back to Userspace mode", err)
-				_ = tunDev.Close()
-				activeMode = "userspace"
-			} else {
-				a.tunRouter = router
-				log.Printf("[App] System TUN L3 adapter activated successfully on %s (%s)", tunDev.Name(), vIP)
-			}
+	// 5. Create and start system TUN L3 adapter
+	tunDev, tunErr := tun.OpenDevice("turnp2p0", vIP)
+	if tunErr != nil {
+		_ = bondedPacketConn.Close()
+		if a.sigClient != nil {
+			a.sigClient.Stop()
+			a.sigClient = nil
 		}
+		a.status.StatusText = fmt.Sprintf("TUN Adapter Error: %v", tunErr)
+		a.emitStatusChangeLocked()
+		return nil, fmt.Errorf("не удалось создать виртуальный сетевой адаптер TUN: %w (на Windows запустите от имени Администратора, на Linux требуется CAP_NET_ADMIN)", tunErr)
 	}
+
+	router := tun.NewRouter(tunDev, node)
+	if err := router.Start(context.Background()); err != nil {
+		_ = tunDev.Close()
+		_ = bondedPacketConn.Close()
+		if a.sigClient != nil {
+			a.sigClient.Stop()
+			a.sigClient = nil
+		}
+		a.status.StatusText = fmt.Sprintf("TUN Router Error: %v", err)
+		a.emitStatusChangeLocked()
+		return nil, fmt.Errorf("не удалось запустить маршрутизатор TUN: %w", err)
+	}
+	a.tunRouter = router
+	log.Printf("[App] System TUN L3 adapter activated successfully on %s (%s)", tunDev.Name(), vIP)
 
 	initialActive := bondedPacketConn.ActiveCount()
 
@@ -390,13 +386,13 @@ func (a *App) JoinNetwork(vkLink string, nickname string, customDomain string, o
 		FirewallMode: mode,
 		SharedPorts:  ports,
 		StreamsCount: initialActive,
-		NetworkMode:  activeMode,
+		NetworkMode:  "tun",
 		HostsSync:    true,
 	}
 
 	a.emitStatusChangeLocked()
 
-	log.Printf("[App] Network joined successfully: %s (%s, %s) in %s mode with %d streams", name, vIP, domain, activeMode, initialActive)
+	log.Printf("[App] Network joined successfully: %s (%s, %s) in TUN L3 mode with %d streams", name, vIP, domain, initialActive)
 	return &a.status, nil
 }
 

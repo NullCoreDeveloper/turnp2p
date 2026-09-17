@@ -57,6 +57,7 @@ require (
 	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/sync v0.21.0 // indirect
 	golang.org/x/text v0.39.0 // indirect
+	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
 )
 
 // replace github.com/wailsapp/wails/v2 v2.16.0 => /home/nethunter/go/pkg/mod

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import './App.css';
 
 interface Peer {
@@ -86,12 +86,21 @@ export function App() {
     name: '',
     relayAddr: '',
     streams: 3,
-    networkMode: 'userspace',
-    hostsSync: false,
+    networkMode: 'tun',
+    hostsSync: true,
     obfKey: '',
   });
   const [peers, setPeers] = useState<Peer[]>([]);
   const [copiedText, setCopiedText] = useState<string | null>(null);
+
+  // Deterministically sorted peer list so UI cards never jump or reorder on ping updates
+  const sortedPeers = useMemo(() => {
+    return [...peers].sort((a, b) => {
+      const nameCompare = (a.name || '').localeCompare(b.name || '');
+      if (nameCompare !== 0) return nameCompare;
+      return (a.virtualIp || '').localeCompare(b.virtualIp || '');
+    });
+  }, [peers]);
 
   // Firewall state
   const [firewallMode, setFirewallMode] = useState<string>(() => localStorage.getItem('turnp2p_firewallMode') || 'whitelist');
@@ -144,7 +153,7 @@ export function App() {
             name: status.nodeName,
             relayAddr: status.relayAddr || '',
             streams: status.streamsCount || 10,
-            networkMode: status.networkMode || 'userspace',
+            networkMode: 'tun',
             hostsSync: status.hostsSync ?? true,
             obfKey: status.obfKey || obfKey,
           });
@@ -220,6 +229,9 @@ export function App() {
     }
     if (raw.includes('не удалось получить TURN данные')) {
       return 'Не удалось подключиться к VK звонку. Проверьте правильность ссылки.';
+    }
+    if (raw.includes('Администратора') || raw.includes('CAP_NET_ADMIN') || raw.includes('TUN')) {
+      return raw;
     }
     return raw.replace(/^failed to get TURN credentials:\s*/i, '').replace(/^failed to fetch VK TURN credentials with all available API clients:\s*/i, '');
   };
@@ -496,31 +508,13 @@ export function App() {
                   </div>
                 </div>
 
-                {/* Network Mode Selection */}
-                <div className="input-group" style={{ marginBottom: '14px' }}>
-                  <label>Режим работы сети</label>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginTop: '4px' }}>
-                    <button
-                      type="button"
-                      className={`btn btn-sm ${networkMode === 'userspace' ? 'btn' : 'btn-secondary'}`}
-                      style={{ padding: '8px', fontSize: '0.8rem', textAlign: 'center' }}
-                      onClick={() => handleNetworkModeChange('userspace')}
-                    >
-                      👤 Userspace + Hosts (без root)
-                    </button>
-                    <button
-                      type="button"
-                      className={`btn btn-sm ${networkMode === 'tun' ? 'btn' : 'btn-secondary'}`}
-                      style={{ padding: '8px', fontSize: '0.8rem', textAlign: 'center' }}
-                      onClick={() => handleNetworkModeChange('tun')}
-                    >
-                      🛡️ TUN L3 Адаптер (10.42.x.x)
-                    </button>
+                {/* Universal TUN L3 Networking Info */}
+                <div style={{ background: 'rgba(52, 211, 153, 0.08)', border: '1px solid rgba(52, 211, 153, 0.25)', borderRadius: '10px', padding: '12px', marginBottom: '14px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#34d399', fontWeight: 600, fontSize: '0.85rem' }}>
+                    <span>🛡️ Системный L3 TUN адаптер (10.42.0.0/16)</span>
                   </div>
-                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '4px' }}>
-                    {networkMode === 'userspace'
-                      ? '✓ Автоматический проброс портов в фоне. Имена *.vkturn синхронизируются в hosts.'
-                      : '✓ Создает системный интерфейс turnp2p0 (10.42.0.0/16). Требует root/admin.'}
+                  <div style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginTop: '4px', lineHeight: 1.4 }}>
+                    ✓ Нативный сетевой адаптер (Wintun / Linux TUN). Все игры, сервисы и пинги работают напрямую по IP и домену с авто-синхронизацией hosts.
                   </div>
                 </div>
 
@@ -545,7 +539,10 @@ export function App() {
                     <span className="card-title">Локальный узел</span>
                     <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
                       <span className="badge" style={{ color: '#34d399', background: 'rgba(52, 211, 153, 0.15)' }}>
-                        {localInfo.networkMode === 'tun' ? '🛡️ TUN L3' : '👤 Userspace'}
+                        🛡️ TUN L3 Адаптер
+                      </span>
+                      <span className="badge" style={{ color: '#a78bfa', background: 'rgba(167, 139, 250, 0.15)' }}>
+                        📝 Hosts Sync
                       </span>
                       <span className="badge" style={{ color: '#60a5fa' }}>{localInfo.streams} Потоков</span>
                       <span
@@ -632,7 +629,7 @@ export function App() {
                 {/* Peers in Network */}
                 <div className="card">
                   <div className="card-header">
-                    <span className="card-title">Участники в комнате ({peers.length})</span>
+                    <span className="card-title">Участники в комнате ({sortedPeers.length})</span>
                     <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Авто-обмен через WebSocket</span>
                   </div>
 
@@ -659,63 +656,69 @@ export function App() {
                     </p>
                   )}
 
-                  {peers.length === 0 ? (
+                  {sortedPeers.length === 0 ? (
                     <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', textAlign: 'center', padding: '16px 0' }}>
                       Ожидание обнаружения других участников в комнате...
                     </p>
                   ) : (
-                    peers.map(p => (
-                      <div key={p.id} className="peer-row" style={{ alignItems: 'center' }}>
-                        <div style={{ flex: 1 }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            <strong>{p.name}</strong>
-                            <strong
-                              style={{ color: '#c084fc', cursor: 'pointer', fontSize: '0.82rem' }}
-                              onClick={() => copyToClipboard(p.domain, `Домен ${p.domain}`)}
-                              title="Нажмите для копирования домена"
-                            >
-                              {p.domain}
-                            </strong>
-                          </div>
-                          {p.sharedPorts && p.sharedPorts.length > 0 && (
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '4px', flexWrap: 'wrap' }}>
-                              <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Открытые сервисы:</span>
-                              {p.sharedPorts.map(port => {
-                                const loopIP = `127.0.${p.virtualIp.split('.')[2] || '0'}.${p.virtualIp.split('.')[3] || '1'}`;
-                                const targetAddr = p.domain ? `${p.domain}:${port}` : `${loopIP}:${port}`;
-                                return (
-                                  <span
-                                    key={port}
-                                    className="badge"
-                                    style={{ padding: '2px 6px', fontSize: '0.72rem', background: 'rgba(52, 211, 153, 0.15)', color: '#34d399', border: '1px solid rgba(52, 211, 153, 0.3)', cursor: 'pointer' }}
-                                    onClick={() => copyToClipboard(targetAddr, targetAddr)}
-                                    title={`Кликните чтобы скопировать адрес ${targetAddr} (${loopIP}:${port})`}
-                                  >
-                                    :{port} (Готов)
-                                  </span>
-                                );
-                              })}
+                    sortedPeers.map(p => {
+                      return (
+                        <div key={p.id || p.virtualIp || p.name} className="peer-row" style={{ alignItems: 'center' }}>
+                          <div style={{ flex: 1 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              <strong>{p.name}</strong>
+                              <strong
+                                style={{ color: '#c084fc', cursor: 'pointer', fontSize: '0.82rem' }}
+                                onClick={() => copyToClipboard(p.domain, `Домен ${p.domain}`)}
+                                title="Нажмите для копирования домена"
+                              >
+                                {p.domain}
+                              </strong>
                             </div>
-                          )}
+                            {p.sharedPorts && p.sharedPorts.length > 0 && (
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '4px', flexWrap: 'wrap' }}>
+                                <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Открытые сервисы:</span>
+                                {p.sharedPorts.map(port => {
+                                  const targetAddr = p.domain ? `${p.domain}:${port}` : `${p.virtualIp}:${port}`;
+                                  return (
+                                    <span
+                                      key={port}
+                                      className="badge"
+                                      style={{ padding: '2px 6px', fontSize: '0.72rem', background: 'rgba(52, 211, 153, 0.15)', color: '#34d399', border: '1px solid rgba(52, 211, 153, 0.3)', cursor: 'pointer' }}
+                                      onClick={() => copyToClipboard(targetAddr, targetAddr)}
+                                      title={`Кликните чтобы скопировать адрес ${targetAddr}`}
+                                    >
+                                      :{port} (Готов)
+                                    </span>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <span
+                              className="badge"
+                              style={{ cursor: 'pointer' }}
+                              onClick={() => copyToClipboard(p.virtualIp, `IP ${p.virtualIp}`)}
+                              title="Копировать виртуальный IP"
+                            >
+                              {p.virtualIp}
+                            </span>
+                            <span
+                              className="badge ping"
+                              style={{
+                                minWidth: '68px',
+                                textAlign: 'center',
+                                fontVariantNumeric: 'tabular-nums',
+                                display: 'inline-block',
+                              }}
+                            >
+                              {p.ping} ms
+                            </span>
+                          </div>
                         </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                          <span
-                            className="badge"
-                            style={{ cursor: 'pointer' }}
-                            onClick={() => {
-                              const ipToCopy = networkMode === 'userspace' && p.virtualIp
-                                ? `127.0.${p.virtualIp.split('.')[2] || '0'}.${p.virtualIp.split('.')[3] || '1'}`
-                                : p.virtualIp;
-                              copyToClipboard(ipToCopy, `IP ${ipToCopy}`);
-                            }}
-                            title={networkMode === 'userspace' && p.virtualIp ? `Копировать локальный loopback (127.0.${p.virtualIp.split('.')[2] || '0'}.${p.virtualIp.split('.')[3] || '1'})` : 'Копировать IP'}
-                          >
-                            {networkMode === 'userspace' && p.virtualIp ? `127.0.${p.virtualIp.split('.')[2] || '0'}.${p.virtualIp.split('.')[3] || '1'}` : p.virtualIp}
-                          </span>
-                          <span className="badge ping">{p.ping} ms</span>
-                        </div>
-                      </div>
-                    ))
+                      );
+                    })
                   )}
                 </div>
 
