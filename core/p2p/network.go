@@ -59,12 +59,13 @@ type Peer struct {
 
 // HeartbeatPayload is broadcasted periodically over the TURN relay.
 type HeartbeatPayload struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	VirtualIP   string `json:"virtualIp"`
-	Domain      string `json:"domain"`
-	SharedPorts []int  `json:"sharedPorts"`
-	Timestamp   int64  `json:"timestamp"`
+	ID               string `json:"id"`
+	Name             string `json:"name"`
+	VirtualIP        string `json:"virtualIp"`
+	Domain           string `json:"domain"`
+	SharedPorts      []int  `json:"sharedPorts"`
+	Timestamp        int64  `json:"timestamp"`
+	ReplyToTimestamp int64  `json:"replyToTimestamp,omitempty"`
 }
 
 // FirewallConfig holds inbound traffic control rules.
@@ -85,6 +86,7 @@ type MeshNode struct {
 	peersByID   map[string]*Peer       // key: peerID
 	peersByDom  map[string]*Peer       // key: domain (lowercase)
 	peerAddrs   map[string]net.Addr    // key: peerID -> remote relay net.Addr
+	lastPeerTs  map[string]int64       // key: peerAddr string -> last received timestamp
 	listeners   map[int]net.Listener   // key: port -> virtual listener
 	streams     map[uint32]*VirtualStream
 	streamSeq   atomic.Uint32
@@ -147,8 +149,10 @@ func NewMeshNode(name string, customDomain string, virtualIP string) *MeshNode {
 		peersByID:  make(map[string]*Peer),
 		peersByDom: make(map[string]*Peer),
 		peerAddrs:  make(map[string]net.Addr),
+		lastPeerTs: make(map[string]int64),
 		listeners:  make(map[int]net.Listener),
 		streams:    make(map[uint32]*VirtualStream),
+
 		firewall: FirewallConfig{
 			Mode:         FirewallModeWhitelist,
 			AllowedPorts: make(map[int]bool),
@@ -353,10 +357,13 @@ func (n *MeshNode) handleHeartbeat(payload []byte, addr net.Addr) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	now := time.Now()
-	ping := int(time.Since(time.UnixMilli(hb.Timestamp)).Milliseconds())
-	if ping < 0 {
-		ping = 0
+	n.lastPeerTs[addr.String()] = hb.Timestamp
+
+	nowTime := time.Now()
+	nowMs := nowTime.UnixMilli()
+	var ping int
+	if hb.ReplyToTimestamp > 0 && nowMs >= hb.ReplyToTimestamp {
+		ping = int(nowMs - hb.ReplyToTimestamp)
 	}
 
 	peer, exists := n.peersByID[hb.ID]
@@ -369,7 +376,7 @@ func (n *MeshNode) handleHeartbeat(payload []byte, addr net.Addr) {
 			SharedPorts: hb.SharedPorts,
 			RelayAddr:   addr.String(),
 			Ping:        ping,
-			LastSeen:    now,
+			LastSeen:    nowTime,
 		}
 		n.peersByID[hb.ID] = peer
 		n.peers[hb.VirtualIP] = peer
@@ -387,10 +394,13 @@ func (n *MeshNode) handleHeartbeat(payload []byte, addr net.Addr) {
 			peer.Domain = hb.Domain
 			n.peersByDom[strings.ToLower(hb.Domain)] = peer
 		}
-		peer.Ping = ping
-		peer.LastSeen = now
-		peer.RelayAddr = addr.String()
+		peer.Name = hb.Name
 		peer.SharedPorts = hb.SharedPorts
+		peer.LastSeen = nowTime
+		if ping > 0 || peer.Ping == 0 {
+			peer.Ping = ping
+		}
+		peer.RelayAddr = addr.String()
 		n.peerAddrs[hb.ID] = addr
 	}
 
@@ -420,13 +430,15 @@ func (n *MeshNode) PingAddress(addr net.Addr) error {
 	for p := range n.firewall.AllowedPorts {
 		allowedPorts = append(allowedPorts, p)
 	}
+	replyTs := n.lastPeerTs[addr.String()]
 	hb := HeartbeatPayload{
-		ID:          n.id,
-		Name:        n.name,
-		VirtualIP:   n.virtualIP,
-		Domain:      n.domain,
-		SharedPorts: allowedPorts,
-		Timestamp:   time.Now().UnixMilli(),
+		ID:               n.id,
+		Name:             n.name,
+		VirtualIP:        n.virtualIP,
+		Domain:           n.domain,
+		SharedPorts:      allowedPorts,
+		Timestamp:        time.Now().UnixMilli(),
+		ReplyToTimestamp: replyTs,
 	}
 	n.mu.RUnlock()
 
@@ -446,7 +458,7 @@ func (n *MeshNode) PingAddress(addr net.Addr) error {
 	return lastErr
 }
 
-// ConnectPeer resolves a remote address string and sends continuous discovery pings.
+// ConnectPeer resolves a remote address string and sends a discovery ping.
 func (n *MeshNode) ConnectPeer(addrStr string) error {
 	addrStr = strings.TrimSpace(addrStr)
 	udpAddr, err := net.ResolveUDPAddr("udp", addrStr)
@@ -454,20 +466,8 @@ func (n *MeshNode) ConnectPeer(addrStr string) error {
 		return fmt.Errorf("invalid peer address: %w", err)
 	}
 
-	// Send an initial ping immediately
+	// Send a single initial ping immediately
 	err = n.PingAddress(udpAddr)
-
-	// Send periodic burst in background for 5 seconds to punch through stateful TURN allocations
-	go func() {
-		for i := 0; i < 8; i++ {
-			time.Sleep(400 * time.Millisecond)
-			if !n.running.Load() {
-				return
-			}
-			_ = n.PingAddress(udpAddr)
-		}
-	}()
-
 	return err
 }
 

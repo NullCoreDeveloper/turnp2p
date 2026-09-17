@@ -47,10 +47,10 @@ func OpenDevice(name string, virtualIP string) (Device, error) {
 			currentUser = "root"
 		}
 
-		// Create persistent TUN device owned by current user and configure IP and routing
+		// Create persistent TUN device owned by current user and configure IP, MTU and routing
 		script := fmt.Sprintf(`ip tuntap add dev %[1]s mode tun user %[2]s 2>/dev/null || true
 ip addr add %[3]s/16 dev %[1]s 2>/dev/null || true
-ip link set dev %[1]s up
+ip link set dev %[1]s mtu 1280 up
 ip route add 10.42.0.0/16 dev %[1]s 2>/dev/null || true`, name, currentUser, virtualIP)
 
 		cmd := exec.Command("pkexec", "sh", "-c", script)
@@ -91,7 +91,7 @@ func tryOpenTun(name string, virtualIP string) (Device, error) {
 	// Configure IP and bring interface up (if running as root or if not already done)
 	if virtualIP != "" {
 		_ = exec.Command("ip", "addr", "add", virtualIP+"/16", "dev", actualName).Run()
-		_ = exec.Command("ip", "link", "set", "dev", actualName, "up").Run()
+		_ = exec.Command("ip", "link", "set", "dev", actualName, "mtu", "1280", "up").Run()
 		_ = exec.Command("ip", "route", "add", "10.42.0.0/16", "dev", actualName).Run()
 	}
 
