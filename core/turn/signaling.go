@@ -234,13 +234,21 @@ func (s *SignalingClient) Stop() {
 	s.mu.Unlock()
 
 	s.clientsMu.Lock()
+	clientsToClose := make([]mqtt.Client, 0, len(s.clients))
 	for _, client := range s.clients {
 		if client != nil {
-			client.Disconnect(250)
+			clientsToClose = append(clientsToClose, client)
 		}
 	}
 	s.clients = make(map[string]mqtt.Client)
 	s.clientsMu.Unlock()
+
+	for _, client := range clientsToClose {
+		cl := client
+		go func() {
+			cl.Disconnect(100)
+		}()
+	}
 }
 
 func (s *SignalingClient) runLoop() {

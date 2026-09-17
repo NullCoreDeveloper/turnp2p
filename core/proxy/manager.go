@@ -95,6 +95,16 @@ func (m *Manager) AddRule(rule ForwardingRule) error {
 
 	listenAddr := fmt.Sprintf("%s:%d", rule.LocalIP, rule.LocalPort)
 	listener, err := net.Listen("tcp", listenAddr)
+	if err != nil && rule.LocalIP != "127.0.0.1" && rule.LocalIP != "" {
+		// Fallback to standard 127.0.0.1 if OS loopback does not support 127.x.x.x (e.g. Windows)
+		fallbackAddr := fmt.Sprintf("127.0.0.1:%d", rule.LocalPort)
+		if fbListener, fbErr := net.Listen("tcp", fallbackAddr); fbErr == nil {
+			listener = fbListener
+			listenAddr = fallbackAddr
+			rule.LocalIP = "127.0.0.1"
+			err = nil
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("failed to bind local %s:%d: %w", rule.LocalIP, rule.LocalPort, err)
 	}

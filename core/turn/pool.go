@@ -439,22 +439,24 @@ func (m *MultiStreamPacketConn) Close() error {
 	m.cancel()
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	streams := m.streams
+	m.streams = nil
+	m.mu.Unlock()
 
 	var lastErr error
-	for _, s := range m.streams {
+	for _, s := range streams {
 		if s.conn != nil {
 			if err := s.conn.Close(); err != nil {
 				lastErr = err
 			}
 		}
 		if s.client != nil {
-			if err := s.client.Disconnect(); err != nil {
-				lastErr = err
-			}
+			client := s.client
+			go func() {
+				_ = client.Disconnect()
+			}()
 		}
 	}
-	m.streams = nil
 
 	return lastErr
 }

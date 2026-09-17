@@ -1,6 +1,7 @@
 package hosts
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -62,8 +64,11 @@ func (m *Manager) RequestPermissions() error {
 		return nil
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
 	if runtime.GOOS == "windows" {
-		cmd := exec.Command("powershell", "-Command", fmt.Sprintf(`Start-Process powershell -Verb RunAs -Wait -ArgumentList '-Command icacls "%s" /grant "Users:(M)"'`, m.hostsPath))
+		cmd := exec.CommandContext(ctx, "powershell", "-Command", fmt.Sprintf(`Start-Process powershell -Verb RunAs -Wait -ArgumentList '-Command icacls "%s" /grant "Users:(M)"'`, m.hostsPath))
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("failed to grant windows hosts permissions: %w", err)
 		}
@@ -73,7 +78,7 @@ func (m *Manager) RequestPermissions() error {
 			currentUser = "root"
 		}
 		script := fmt.Sprintf("setfacl -m u:%s:rw %s 2>/dev/null || chmod 666 %s", currentUser, m.hostsPath, m.hostsPath)
-		cmd := exec.Command("pkexec", "sh", "-c", script)
+		cmd := exec.CommandContext(ctx, "pkexec", "sh", "-c", script)
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("failed to grant linux hosts permissions via pkexec: %w", err)
 		}
@@ -104,7 +109,7 @@ func (m *Manager) Sync(entries map[string]string) error {
 	cleaned := removeTurnP2PBlock(content)
 
 	if len(entries) == 0 {
-		return m.writeFileWithElevation(m.hostsPath, []byte(cleaned))
+		return m.writeFileWithElevation(m.hostsPath, []byte(cleaned), false)
 	}
 
 	var sb strings.Builder
@@ -123,12 +128,12 @@ func (m *Manager) Sync(entries map[string]string) error {
 	}
 	sb.WriteString(markerEnd + "\n")
 
-	return m.writeFileWithElevation(m.hostsPath, []byte(sb.String()))
+	return m.writeFileWithElevation(m.hostsPath, []byte(sb.String()), true)
 }
 
-func (m *Manager) writeFileWithElevation(path string, data []byte) error {
+func (m *Manager) writeFileWithElevation(path string, data []byte, allowElevation bool) error {
 	err := os.WriteFile(path, data, 0644)
-	if err != nil && os.IsPermission(err) {
+	if err != nil && os.IsPermission(err) && allowElevation {
 		// Attempt to request elevation once
 		if reqErr := m.RequestPermissions(); reqErr == nil {
 			err = os.WriteFile(path, data, 0644)
@@ -137,9 +142,19 @@ func (m *Manager) writeFileWithElevation(path string, data []byte) error {
 	return err
 }
 
-// Clean removes all TurnP2P entries from the hosts file.
+// Clean removes all TurnP2P entries from the hosts file without triggering elevation popups.
 func (m *Manager) Clean() error {
-	return m.Sync(nil)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	data, err := os.ReadFile(m.hostsPath)
+	if err != nil {
+		return nil
+	}
+
+	content := string(data)
+	cleaned := removeTurnP2PBlock(content)
+	return m.writeFileWithElevation(m.hostsPath, []byte(cleaned), false)
 }
 
 func removeTurnP2PBlock(content string) string {

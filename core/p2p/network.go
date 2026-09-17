@@ -12,6 +12,8 @@ import (
 	"net"
 	"os"
 	"regexp"
+	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -113,9 +115,13 @@ func SanitizeDomain(input string) string {
 	return cleaned
 }
 
-// ToLoopbackIP converts a mesh virtual IP (e.g. 10.42.X.Y) into a unique local loopback IP (127.0.X.Y).
-// This prevents port collisions between different peers in Userspace mode.
+// ToLoopbackIP converts a mesh virtual IP (e.g. 10.42.X.Y) into a local loopback IP.
+// On Windows, the OS loopback interface is strictly 127.0.0.1 by default (127.0.X.Y fails with WSAEADDRNOTAVAIL).
+// On Linux, the entire 127.0.0.0/8 block is routed to lo.
 func ToLoopbackIP(virtualIP string) string {
+	if runtime.GOOS == "windows" {
+		return "127.0.0.1"
+	}
 	parts := strings.Split(strings.TrimSpace(virtualIP), ".")
 	if len(parts) == 4 {
 		return fmt.Sprintf("127.0.%s.%s", parts[2], parts[3])
@@ -324,7 +330,7 @@ func (n *MeshNode) GetInfo() (id, name, virtualIP, domain string) {
 	return n.id, n.name, n.virtualIP, n.domain
 }
 
-// GetPeers returns a slice of currently active peers in the mesh.
+// GetPeers returns a slice of currently active peers in the mesh, sorted deterministically.
 func (n *MeshNode) GetPeers() []Peer {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
@@ -333,6 +339,15 @@ func (n *MeshNode) GetPeers() []Peer {
 	for _, p := range n.peers {
 		res = append(res, *p)
 	}
+
+	// Deterministic sort by Name, then by VirtualIP so ping updates never cause UI elements to jump
+	sort.Slice(res, func(i, j int) bool {
+		if res[i].Name != res[j].Name {
+			return res[i].Name < res[j].Name
+		}
+		return res[i].VirtualIP < res[j].VirtualIP
+	})
+
 	return res
 }
 
