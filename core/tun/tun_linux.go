@@ -35,34 +35,40 @@ func OpenDevice(name string, virtualIP string) (Device, error) {
 		name = "turnp2p0"
 	}
 
-	dev, err := tryOpenTun(name, virtualIP)
-	if err == nil {
-		return dev, nil
+	if err := configureInterface(name, virtualIP); err != nil {
+		return nil, err
 	}
 
-	// If failed and not running as root, attempt automatic elevation via pkexec
-	if os.Geteuid() != 0 {
-		currentUser := os.Getenv("USER")
-		if currentUser == "" {
-			currentUser = "root"
-		}
+	return tryOpenTun(name, virtualIP)
+}
 
-		// Create persistent TUN device owned by current user and configure IP, MTU and routing
-		script := fmt.Sprintf(`ip tuntap add dev %[1]s mode tun user %[2]s 2>/dev/null || true
-ip addr add %[3]s/16 dev %[1]s 2>/dev/null || true
+func configureInterface(name string, virtualIP string) error {
+	currentUser := os.Getenv("USER")
+	if currentUser == "" {
+		currentUser = "root"
+	}
+
+	script := fmt.Sprintf(`ip tuntap add dev %[1]s mode tun user %[2]s 2>/dev/null || true
+ip addr flush dev %[1]s 2>/dev/null || true
+ip addr add %[3]s/16 dev %[1]s
 ip link set dev %[1]s mtu 1280 up
-ip route add 10.42.0.0/16 dev %[1]s 2>/dev/null || true`, name, currentUser, virtualIP)
+ip route replace 10.42.0.0/16 dev %[1]s 2>/dev/null || true`, name, currentUser, virtualIP)
 
-		cmd := exec.Command("pkexec", "sh", "-c", script)
-		if elevErr := cmd.Run(); elevErr != nil {
-			return nil, fmt.Errorf("failed to configure TUN interface via pkexec: %w (original error: %v)", elevErr, err)
-		}
-
-		// Retry opening the now-configured TUN device
-		return tryOpenTun(name, virtualIP)
+	if os.Geteuid() == 0 {
+		return exec.Command("sh", "-c", script).Run()
 	}
 
-	return nil, err
+	// Try without pkexec first (in case user has capabilities or sudo rules)
+	if err := exec.Command("sh", "-c", script).Run(); err == nil {
+		return nil
+	}
+
+	// Elevate via pkexec
+	cmd := exec.Command("pkexec", "sh", "-c", script)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to configure TUN interface %s via pkexec: %w", name, err)
+	}
+	return nil
 }
 
 func tryOpenTun(name string, virtualIP string) (Device, error) {
@@ -88,13 +94,6 @@ func tryOpenTun(name string, virtualIP string) (Device, error) {
 
 	f := os.NewFile(uintptr(fd), "/dev/net/tun")
 
-	// Configure IP and bring interface up (if running as root or if not already done)
-	if virtualIP != "" {
-		_ = exec.Command("ip", "addr", "add", virtualIP+"/16", "dev", actualName).Run()
-		_ = exec.Command("ip", "link", "set", "dev", actualName, "mtu", "1280", "up").Run()
-		_ = exec.Command("ip", "route", "add", "10.42.0.0/16", "dev", actualName).Run()
-	}
-
 	return &linuxDevice{
 		file: f,
 		name: actualName,
@@ -111,8 +110,13 @@ func (d *linuxDevice) Write(p []byte) (n int, err error) {
 }
 
 func (d *linuxDevice) Close() error {
-	_ = exec.Command("ip", "link", "set", "dev", d.name, "down").Run()
-	return d.file.Close()
+	var closeErr error
+	if d.file != nil {
+		closeErr = d.file.Close()
+	}
+	_ = exec.Command("ip", "link", "delete", "dev", d.name).Run()
+	_ = exec.Command("ip", "tuntap", "del", "dev", d.name, "mode", "tun").Run()
+	return closeErr
 }
 
 func (d *linuxDevice) Name() string { return d.name }

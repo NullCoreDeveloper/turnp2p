@@ -206,3 +206,16 @@ func (c *PionClient) GetServerIP() string {
 	defer c.mu.RUnlock()
 	return c.serverIP
 }
+
+// CreatePermission explicitly grants TURN forwarding permission for a peer IP.
+func (c *PionClient) CreatePermission(ip net.IP) error {
+	c.mu.RLock()
+	client := c.client
+	c.mu.RUnlock()
+	
+	if client == nil {
+		return fmt.Errorf("TURN client not initialized")
+	}
+	
+	return client.CreatePermission(&net.UDPAddr{IP: ip, Port: 0})
+}

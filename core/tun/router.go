@@ -13,11 +13,13 @@ import (
 
 // Router bridges raw L3 IP packets between the OS TUN device and the P2P MeshNode.
 type Router struct {
-	dev    Device
-	node   *p2p.MeshNode
-	ctx    context.Context
-	cancel context.CancelFunc
-	closed atomic.Bool
+	dev         Device
+	node        *p2p.MeshNode
+	ctx         context.Context
+	cancel      context.CancelFunc
+	closed      atomic.Bool
+	lastErrLog  time.Time
+	lastErrDst  string
 }
 
 // NewRouter creates an L3 IP packet router.
@@ -45,7 +47,9 @@ func (r *Router) Start(ctx context.Context) error {
 		if r.closed.Load() {
 			return
 		}
-		_, _ = r.dev.Write(ipPacket)
+		if _, err := r.dev.Write(ipPacket); err != nil {
+			log.Printf("[TUN Router] Error writing incoming L3 packet to %s: %v", r.dev.Name(), err)
+		}
 	})
 
 	go r.tunReadLoop()
@@ -97,8 +101,17 @@ func (r *Router) tunReadLoop() {
 		copy(packetData, buf[:n])
 
 		if err := r.node.SendRawIP(dstIP, packetData); err != nil {
-			// Peer not yet discovered or not in mesh
+			r.logSendError(dstIP, err)
 			continue
 		}
+	}
+}
+
+func (r *Router) logSendError(dstIP string, err error) {
+	now := time.Now()
+	if now.Sub(r.lastErrLog) > 3*time.Second || r.lastErrDst != dstIP {
+		r.lastErrLog = now
+		r.lastErrDst = dstIP
+		log.Printf("[TUN Router] Cannot forward L3 packet to %s: %v", dstIP, err)
 	}
 }

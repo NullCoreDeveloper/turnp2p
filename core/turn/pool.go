@@ -35,6 +35,7 @@ type MultiStreamPacketConn struct {
 	onCountChange func(active int, target int)
 	sigSender     func(data []byte, targetAddr string)
 	streamIDSeq   atomic.Int32
+	permittedIPs  map[string]net.IP
 }
 
 type packetResult struct {
@@ -47,14 +48,15 @@ type packetResult struct {
 func NewMultiStreamPacketConn(ctx context.Context, initialStreams []*streamHolder, creds *Credentials, obfKey string, targetCount int) *MultiStreamPacketConn {
 	mctx, cancel := context.WithCancel(ctx)
 	mpc := &MultiStreamPacketConn{
-		streams:     make([]*streamHolder, 0, targetCount),
-		targetCount: targetCount,
-		creds:       creds,
-		obfKey:      obfKey,
-		readChan:    make(chan packetResult, 1024),
-		wakeChan:    make(chan struct{}, 16),
-		ctx:         mctx,
-		cancel:      cancel,
+		streams:      make([]*streamHolder, 0, targetCount),
+		targetCount:  targetCount,
+		creds:        creds,
+		obfKey:       obfKey,
+		readChan:     make(chan packetResult, 1024),
+		wakeChan:     make(chan struct{}, 16),
+		ctx:          mctx,
+		cancel:       cancel,
+		permittedIPs: make(map[string]net.IP),
 	}
 	mpc.streamIDSeq.Store(int32(len(initialStreams)))
 
@@ -97,7 +99,19 @@ func (m *MultiStreamPacketConn) AddStream(client *PionClient, conn net.PacketCon
 	m.addStreamInternal(holder)
 	activeCount := len(m.streams)
 	cb := m.onCountChange
+
+	// Apply all stored permissions to the newly added stream
+	perms := make([]net.IP, 0, len(m.permittedIPs))
+	for _, p := range m.permittedIPs {
+		perms = append(perms, p)
+	}
 	m.mu.Unlock()
+
+	for _, p := range perms {
+		if client != nil {
+			go client.CreatePermission(p)
+		}
+	}
 
 	log.Printf("[Stream Pool] Added stream %d to active pool. Total active: %d/%d", newID, activeCount, m.targetCount)
 	if cb != nil {
@@ -155,6 +169,52 @@ func (m *MultiStreamPacketConn) ActiveCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return len(m.streams)
+}
+
+// EnsurePermission asynchronously grants TURN permission for a peer IP across all active streams.
+func (m *MultiStreamPacketConn) EnsurePermission(ip net.IP) {
+	if ip == nil {
+		return
+	}
+	m.mu.Lock()
+	if m.permittedIPs == nil {
+		m.permittedIPs = make(map[string]net.IP)
+	}
+	ipStr := ip.String()
+	if _, exists := m.permittedIPs[ipStr]; exists {
+		m.mu.Unlock()
+		return
+	}
+	m.permittedIPs[ipStr] = ip
+	streams := append([]*streamHolder{}, m.streams...)
+	m.mu.Unlock()
+
+	for _, holder := range streams {
+		if holder.client != nil {
+			go holder.client.CreatePermission(ip)
+		}
+	}
+	log.Printf("[Stream Pool] Ensured TURN permission for peer IP %s on %d streams", ip, len(streams))
+}
+
+// EnsurePermissions asynchronously grants TURN permissions for multiple peer IPs across all streams.
+func (m *MultiStreamPacketConn) EnsurePermissions(ips []net.IP) {
+	for _, ip := range ips {
+		m.EnsurePermission(ip)
+	}
+}
+
+// AllRelayAddrs returns all active TURN relay addresses across streams in the pool.
+func (m *MultiStreamPacketConn) AllRelayAddrs() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var addrs []string
+	for _, s := range m.streams {
+		if s.conn != nil && s.conn.LocalAddr() != nil {
+			addrs = append(addrs, s.conn.LocalAddr().String())
+		}
+	}
+	return addrs
 }
 
 func (m *MultiStreamPacketConn) readWorker(holder *streamHolder) {
@@ -338,10 +398,23 @@ func (m *MultiStreamPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	candidates := m.streams
 	var holder *streamHolder
 	if addr != nil {
+		host, _, _ := net.SplitHostPort(addr.String())
+		var sameServerStreams []*streamHolder
+		for _, s := range candidates {
+			if s.client != nil && s.client.GetServerIP() == host {
+				sameServerStreams = append(sameServerStreams, s)
+			}
+		}
+
 		h := fnv.New32a()
 		h.Write([]byte(addr.String()))
-		idx := int(h.Sum32() % uint32(len(candidates)))
-		holder = candidates[idx]
+		if len(sameServerStreams) > 0 {
+			idx := int(h.Sum32() % uint32(len(sameServerStreams)))
+			holder = sameServerStreams[idx]
+		} else {
+			idx := int(h.Sum32() % uint32(len(candidates)))
+			holder = candidates[idx]
+		}
 	} else {
 		idx := int(m.roundRobin.Add(1) % uint64(len(candidates)))
 		holder = candidates[idx]

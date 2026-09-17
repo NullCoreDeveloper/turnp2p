@@ -305,6 +305,17 @@ func (a *App) JoinNetwork(vkLink string, nickname string, customDomain string, o
 	}
 	mode, ports := node.GetFirewallConfig()
 
+	// Pre-authorize permissions for all available TURN server IPs across all streams
+	for _, sa := range creds.ServerAddrs {
+		host, _, _ := net.SplitHostPort(sa)
+		if host == "" {
+			host = sa
+		}
+		if ip := net.ParseIP(host); ip != nil {
+			bondedPacketConn.EnsurePermission(ip)
+		}
+	}
+
 	// 4. Start automatic signaling exchange via VK Call WebSocket if available
 	if creds.WsEndpoint != "" {
 		id, _, _, _ := node.GetInfo()
@@ -313,12 +324,21 @@ func (a *App) JoinNetwork(vkLink string, nickname string, customDomain string, o
 			ID:          id,
 			Name:        name,
 			RelayAddr:   relayAddrStr,
+			RelayAddrs:  bondedPacketConn.AllRelayAddrs(),
 			VirtualIP:   vIP,
 			Domain:      domain,
 			SharedPorts: ports,
 		}
+		var knownRelays sync.Map
 		sig.Start(context.Background(), localInfo, func(peerRelayAddr string) {
-			log.Printf("[App] Discovered peer relay via signaling: %s, connecting...", peerRelayAddr)
+			if _, loaded := knownRelays.LoadOrStore(peerRelayAddr, true); loaded {
+				return
+			}
+			log.Printf("[App] Discovered new peer relay via signaling: %s, connecting...", peerRelayAddr)
+			host, _, _ := net.SplitHostPort(peerRelayAddr)
+			if ip := net.ParseIP(host); ip != nil {
+				bondedPacketConn.EnsurePermission(ip)
+			}
 			_ = node.ConnectPeer(peerRelayAddr)
 		}, func(rawPacket []byte, fromRelay string) {
 			fakeAddr, _ := net.ResolveUDPAddr("udp", fromRelay)

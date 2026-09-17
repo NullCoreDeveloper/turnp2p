@@ -2,97 +2,100 @@ package turn
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
-	"net"
-	"net/http"
-	neturl "net/url"
-	"strconv"
-	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
-	"github.com/gorilla/websocket"
+	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
-// SignalingPeerInfo represents metadata broadcasted by peers over VK call WebSocket.
+// SignalingPeerInfo represents metadata broadcasted by peers.
 type SignalingPeerInfo struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	RelayAddr   string `json:"relayAddr"`
-	VirtualIP   string `json:"virtualIp"`
-	Domain      string `json:"domain"`
-	SharedPorts []int  `json:"sharedPorts"`
-	Timestamp   int64  `json:"timestamp"`
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	RelayAddr   string   `json:"relayAddr"`
+	RelayAddrs  []string `json:"relayAddrs,omitempty"`
+	VirtualIP   string   `json:"virtualIp"`
+	Domain      string   `json:"domain"`
+	SharedPorts []int    `json:"sharedPorts"`
+	Timestamp   int64    `json:"timestamp"`
 }
 
-// SignalingClient manages WebSocket connection to the VK Call signaling server for peer exchange.
+type mqttMsg struct {
+	Type   string `json:"type"`
+	Room   string `json:"room"`
+	Data   string `json:"data"`
+	Relay  string `json:"relay"`
+	Target string `json:"target,omitempty"`
+}
+
+// SignalingClient manages MQTT connection for peer exchange.
 type SignalingClient struct {
-	wsEndpoint   string
-	roomHash     string
-	convID       string
-	obfKey       string
-	myUserID     string
-	myInternalID int64
-	participants map[int64]string // key: participantId -> participantType
-	peerIDs      map[int64]int64  // key: participantId -> peerId
-	seq          int64
-	conn         *websocket.Conn
-	writeMu      sync.Mutex
-	mu           sync.Mutex
-	onPeerAddr   func(relayAddr string)
-	onFrame      func(data []byte, fromRelay string)
-	localInfo    SignalingPeerInfo
-	ctx          context.Context
-	cancel       context.CancelFunc
+	roomHash   string
+	obfKey     string
+	aesGCM     cipher.AEAD
+	client     mqtt.Client
+	mu         sync.Mutex
+	onPeerAddr func(relayAddr string)
+	onFrame    func(data []byte, fromRelay string)
+	localInfo  SignalingPeerInfo
+	ctx        context.Context
+	cancel     context.CancelFunc
 }
 
-func (s *SignalingClient) writeMsg(msgType int, data []byte) error {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	s.mu.Lock()
-	conn := s.conn
-	s.mu.Unlock()
-	if conn == nil {
-		return net.ErrClosed
-	}
-	return conn.WriteMessage(msgType, data)
-}
-
-// NewSignalingClient creates a new VK Call signaling channel client.
+// NewSignalingClient creates a new MQTT signaling channel client with AES-GCM encryption.
 func NewSignalingClient(wsEndpoint string, link string, obfKey string) *SignalingClient {
 	clean := CleanVKLink(link)
-	convID := clean
-	myUID := ""
-
-	if u, err := neturl.Parse(wsEndpoint); err == nil {
-		myUID = u.Query().Get("userId")
-		if cid := u.Query().Get("conversationId"); cid != "" {
-			convID = cid
-		}
-	}
-
-	h := sha256.Sum256([]byte(convID))
+	h := sha256.Sum256([]byte(clean))
 	roomHash := hex.EncodeToString(h[:16])
 
+	keyMaterial := obfKey
+	if keyMaterial == "" {
+		keyMaterial = roomHash
+	}
+	aesKey := sha256.Sum256([]byte(keyMaterial))
+	block, err := aes.NewCipher(aesKey[:])
+	var gcm cipher.AEAD
+	if err == nil {
+		gcm, _ = cipher.NewGCM(block)
+	}
+
 	return &SignalingClient{
-		wsEndpoint:   wsEndpoint,
-		roomHash:     roomHash,
-		convID:       convID,
-		obfKey:       obfKey,
-		myUserID:     myUID,
-		participants: make(map[int64]string),
-		peerIDs:      make(map[int64]int64),
+		roomHash: roomHash,
+		obfKey:   obfKey,
+		aesGCM:   gcm,
 	}
 }
 
-func (s *SignalingClient) nextSeq() int64 {
-	return atomic.AddInt64(&s.seq, 1)
+func (s *SignalingClient) encrypt(plaintext []byte) ([]byte, error) {
+	if s.aesGCM == nil {
+		return plaintext, nil
+	}
+	nonce := make([]byte, s.aesGCM.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, err
+	}
+	return s.aesGCM.Seal(nonce, nonce, plaintext, nil), nil
+}
+
+func (s *SignalingClient) decrypt(ciphertext []byte) ([]byte, error) {
+	if s.aesGCM == nil {
+		return ciphertext, nil
+	}
+	nonceSize := s.aesGCM.NonceSize()
+	if len(ciphertext) < nonceSize {
+		return nil, fmt.Errorf("ciphertext too short")
+	}
+	nonce, ct := ciphertext[:nonceSize], ciphertext[nonceSize:]
+	return s.aesGCM.Open(nil, nonce, ct, nil)
 }
 
 // Start begins listening to the signaling channel and broadcasting local relay address.
@@ -104,6 +107,28 @@ func (s *SignalingClient) Start(ctx context.Context, localInfo SignalingPeerInfo
 	s.ctx, s.cancel = context.WithCancel(ctx)
 	s.mu.Unlock()
 
+	opts := mqtt.NewClientOptions().AddBroker("tcp://broker.emqx.io:1883")
+	opts.SetClientID(fmt.Sprintf("turnp2p-%s-%d", s.roomHash[:8], time.Now().UnixNano()))
+	opts.SetConnectRetry(true)
+	opts.SetConnectRetryInterval(5 * time.Second)
+
+	opts.OnConnect = func(c mqtt.Client) {
+		log.Printf("[Signaling] Connected to MQTT broker (broker.emqx.io)")
+		topic := fmt.Sprintf("turnp2p/room/%s", s.roomHash)
+		c.Subscribe(topic, 1, func(c mqtt.Client, m mqtt.Message) {
+			s.handleMessage(m.Payload())
+		})
+		s.broadcastAnnounce()
+	}
+
+	client := mqtt.NewClient(opts)
+	if token := client.Connect(); token.Wait() && token.Error() != nil {
+		log.Printf("[Signaling] MQTT connect error: %v", token.Error())
+	}
+	s.mu.Lock()
+	s.client = client
+	s.mu.Unlock()
+
 	go s.runLoop()
 }
 
@@ -113,453 +138,132 @@ func (s *SignalingClient) Stop() {
 	if s.cancel != nil {
 		s.cancel()
 	}
-	if s.conn != nil {
-		_ = s.conn.Close()
-		s.conn = nil
+	if s.client != nil {
+		s.client.Disconnect(250)
 	}
 	s.mu.Unlock()
 }
 
 func (s *SignalingClient) runLoop() {
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
-		default:
+		case <-ticker.C:
+			s.broadcastAnnounce()
 		}
-
-		if s.wsEndpoint == "" {
-			time.Sleep(2 * time.Second)
-			continue
-		}
-
-		wsURL := s.wsEndpoint
-		devID := fmt.Sprintf("turnp2p-%x", s.roomHash)
-		if !strings.Contains(wsURL, "appVersion=") {
-			sep := "?"
-			if strings.Contains(wsURL, "?") {
-				sep = "&"
-			}
-			wsURL = fmt.Sprintf("%s%sappVersion=1.1&client_type=SDK_JS&device_idx=0&device=%s&device_id=%s&version=2", wsURL, sep, devID, devID)
-		}
-
-		dialer := websocket.DefaultDialer
-		dialer.HandshakeTimeout = 5 * time.Second
-		headers := http.Header{}
-		headers.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-		headers.Set("Origin", "https://vk.ru")
-
-		conn, _, err := dialer.DialContext(s.ctx, wsURL, headers)
-		if err != nil {
-			log.Printf("[Signaling] WebSocket connect error: %v, retrying in 3s...", err)
-			select {
-			case <-s.ctx.Done():
-				return
-			case <-time.After(3 * time.Second):
-				continue
-			}
-		}
-
-		s.mu.Lock()
-		s.conn = conn
-		s.participants = make(map[int64]string)
-		s.peerIDs = make(map[int64]int64)
-		s.mu.Unlock()
-
-		log.Printf("[Signaling] Connected to VK Call WebSocket channel (%s)", s.localInfo.RelayAddr)
-
-		broadcastTicker := time.NewTicker(2 * time.Second)
-		readDone := make(chan struct{})
-
-		// Start reader
-		go func() {
-			defer close(readDone)
-			for {
-				_, msg, err := conn.ReadMessage()
-				if err != nil {
-					return
-				}
-				s.handleMessage(msg)
-			}
-		}()
-
-	loop:
-		for {
-			select {
-			case <-s.ctx.Done():
-				broadcastTicker.Stop()
-				_ = conn.Close()
-				return
-			case <-readDone:
-				broadcastTicker.Stop()
-				break loop
-			case <-broadcastTicker.C:
-				s.broadcastAnnounce()
-			}
-		}
-
-		time.Sleep(1 * time.Second)
 	}
 }
 
 func (s *SignalingClient) broadcastAnnounce() {
 	s.mu.Lock()
-	conn := s.conn
+	client := s.client
 	info := s.localInfo
-	type partTarget struct {
-		id     int64
-		pType  string
-		peerID int64
-	}
-	targets := make([]partTarget, 0, len(s.participants))
-	for pid, pType := range s.participants {
-		targets = append(targets, partTarget{id: pid, pType: pType, peerID: s.peerIDs[pid]})
-	}
 	s.mu.Unlock()
 
-	if conn == nil || info.RelayAddr == "" {
+	if client == nil || !client.IsConnected() || info.RelayAddr == "" {
 		return
 	}
 
 	info.Timestamp = time.Now().UnixMilli()
-	payload, err := json.Marshal(info)
+	payload, _ := json.Marshal(info)
+
+	msg := mqttMsg{
+		Type:  "turnp2p_announce",
+		Room:  s.roomHash,
+		Data:  string(payload),
+		Relay: info.RelayAddr,
+	}
+	raw, _ := json.Marshal(msg)
+	enc, err := s.encrypt(raw)
 	if err != nil {
 		return
 	}
 
-	msgObj := map[string]interface{}{
-		"type":     "turnp2p_announce",
-		"room":     s.roomHash,
-		"data":     string(payload),
-		"relay":    info.RelayAddr,
-		"sendTime": time.Now().UnixMilli(),
-	}
-	
-	rawMsg, _ := json.Marshal(msgObj)
-	dataStr := base64.StdEncoding.EncodeToString(rawMsg)
-
-	// Send transmit-data to each participant via VK Call protocol
-	for _, target := range targets {
-		if target.peerID > 0 {
-			peerCmd := map[string]interface{}{
-				"command":  "transmit-data",
-				"sequence": s.nextSeq(),
-				"peerId": map[string]interface{}{
-					"id":   target.peerID,
-					"type": "WEB_SOCKET",
-				},
-				"data": dataStr,
-			}
-			if rawP, err := json.Marshal(peerCmd); err == nil {
-				_ = s.writeMsg(websocket.TextMessage, rawP)
-			}
-		} else {
-			transmitCmd := map[string]interface{}{
-				"command":         "transmit-data",
-				"sequence":        s.nextSeq(),
-				"participantId":   target.id,
-				"participantType": target.pType,
-				"data":            dataStr,
-			}
-			if raw, err := json.Marshal(transmitCmd); err == nil {
-				_ = s.writeMsg(websocket.TextMessage, raw)
-			}
-		}
-	}
-
-	if len(targets) > 0 {
-		log.Printf("[Signaling] >>> Broadcast announce to %d peers: relay=%s room=%s", len(targets), info.RelayAddr, s.roomHash)
-	}
+	topic := fmt.Sprintf("turnp2p/room/%s", s.roomHash)
+	client.Publish(topic, 0, false, enc)
 }
 
-// SendFrame transmits a data/mesh frame to peers via the WebSocket signaling transport.
 func (s *SignalingClient) SendFrame(data []byte, targetAddr string) {
 	s.mu.Lock()
-	conn := s.conn
+	client := s.client
 	info := s.localInfo
-	type partTarget struct {
-		id     int64
-		pType  string
-		peerID int64
-	}
-	targets := make([]partTarget, 0, len(s.participants))
-	for pid, pType := range s.participants {
-		targets = append(targets, partTarget{id: pid, pType: pType, peerID: s.peerIDs[pid]})
-	}
 	s.mu.Unlock()
 
-	if conn == nil {
+	if client == nil || !client.IsConnected() {
 		return
 	}
 
-	msgObj := map[string]interface{}{
-		"type":   "turnp2p_frame",
-		"room":   s.roomHash,
-		"relay":  info.RelayAddr,
-		"target": targetAddr,
-		"data":   hex.EncodeToString(data),
+	msg := mqttMsg{
+		Type:   "turnp2p_frame",
+		Room:   s.roomHash,
+		Relay:  info.RelayAddr,
+		Target: targetAddr,
+		Data:   hex.EncodeToString(data),
+	}
+	raw, _ := json.Marshal(msg)
+	enc, err := s.encrypt(raw)
+	if err != nil {
+		return
 	}
 
-	rawMsg, _ := json.Marshal(msgObj)
-	dataStr := base64.StdEncoding.EncodeToString(rawMsg)
-
-	for _, target := range targets {
-		if target.peerID > 0 {
-			peerCmd := map[string]interface{}{
-				"command":  "transmit-data",
-				"sequence": s.nextSeq(),
-				"peerId": map[string]interface{}{
-					"id":   target.peerID,
-					"type": "WEB_SOCKET",
-				},
-				"data": dataStr,
-			}
-			if rawP, err := json.Marshal(peerCmd); err == nil {
-				log.Printf("[Signaling] >>> SendFrame %d bytes to peer %d via WS", len(data), target.peerID)
-				_ = s.writeMsg(websocket.TextMessage, rawP)
-			}
-		} else {
-			transmitCmd := map[string]interface{}{
-				"command":         "transmit-data",
-				"sequence":        s.nextSeq(),
-				"participantId":   target.id,
-				"participantType": "USER",
-				"data":            dataStr,
-			}
-			if raw, err := json.Marshal(transmitCmd); err == nil {
-				log.Printf("[Signaling] >>> SendFrame %d bytes to participant %d via WS", len(data), target.id)
-				_ = s.writeMsg(websocket.TextMessage, raw)
-			}
-		}
-	}
+	topic := fmt.Sprintf("turnp2p/room/%s", s.roomHash)
+	client.Publish(topic, 0, false, enc)
 }
 
-func (s *SignalingClient) handleMessage(msg []byte) {
-	// Handle ping/pong heartbeat from VK server
-	if string(msg) == "ping" {
-		_ = s.writeMsg(websocket.TextMessage, []byte("pong"))
+func (s *SignalingClient) handleMessage(payload []byte) {
+	raw, err := s.decrypt(payload)
+	if err != nil {
+		// Wrong encryption key or corrupt payload, ignore
 		return
 	}
 
-	var obj map[string]interface{}
-	if err := json.Unmarshal(msg, &obj); err != nil {
-		log.Printf("[Signaling] <<< RAW (%d bytes): %s", len(msg), truncate(string(msg), 400))
+	var m mqttMsg
+	if err := json.Unmarshal(raw, &m); err != nil {
 		return
 	}
 
-	msgType, _ := obj["type"].(string)
-	notifType, _ := obj["notification"].(string)
-
-	// Check for ServerHello or conversation updates containing participants
-	if conv, ok := obj["conversation"].(map[string]interface{}); ok {
-		s.updateParticipantsFromConversation(conv)
-	}
-
-	if notifType == "participant-joined" {
-		if part, ok := obj["participant"].(map[string]interface{}); ok {
-			pid := parseParticipantID(part["id"])
-			pType, _ := part["idType"].(string)
-			if pType == "" {
-				pType, _ = part["type"].(string)
-			}
-			if pType == "" || pType == "ANONYMOUS_USER" {
-				pType = "USER"
-			}
-			isSelf := fmt.Sprintf("%d", pid) == s.myUserID || (s.myInternalID > 0 && pid == s.myInternalID)
-			if pid > 0 && !isSelf {
-				s.mu.Lock()
-				s.participants[pid] = pType
-				s.mu.Unlock()
-				log.Printf("[Signaling] Peer joined call: participantId=%d (type=%s)", pid, pType)
-				go s.broadcastAnnounce()
-			}
-		}
-	} else if notifType == "registered-peer" {
-		pid := parseParticipantID(obj["participantId"])
-		if peerObj, ok := obj["peerId"].(map[string]interface{}); ok {
-			peerID := parseParticipantID(peerObj["id"])
-			if pid > 0 && peerID > 0 {
-				s.mu.Lock()
-				s.peerIDs[pid] = peerID
-				s.mu.Unlock()
-				log.Printf("[Signaling] Registered peer: participantId=%d -> peerId=%d", pid, peerID)
-				go s.broadcastAnnounce()
-			}
-		}
-	} else if notifType == "participant-left" {
-		if part, ok := obj["participant"].(map[string]interface{}); ok {
-			pid := parseParticipantID(part["id"])
-			if pid > 0 {
-				s.mu.Lock()
-				delete(s.participants, pid)
-				delete(s.peerIDs, pid)
-				s.mu.Unlock()
-				log.Printf("[Signaling] Peer left call: participantId=%d", pid)
-			}
-		}
-	} else if notifType == "transmitted-data" || notifType == "data" || notifType == "custom-data" || notifType == "send-data" {
-		// Data received from another peer via VK call signaling!
-		var dataMap map[string]interface{}
-		switch d := obj["data"].(type) {
-		case map[string]interface{}:
-			dataMap = d
-		case string:
-			if dec, err := base64.StdEncoding.DecodeString(d); err == nil {
-				_ = json.Unmarshal(dec, &dataMap)
-			} else {
-				_ = json.Unmarshal([]byte(d), &dataMap)
-			}
-		}
-
-		if dataMap != nil {
-			s.handleTurnP2PData(dataMap)
-			return
-		}
-	}
-
-	// Also handle direct message formats or stringified data payloads
-	if msgType == "turnp2p_announce" || msgType == "turnp2p_frame" {
-		s.handleTurnP2PData(obj)
+	if m.Room != s.roomHash || m.Relay == s.localInfo.RelayAddr || m.Relay == "" {
 		return
 	}
 
-	// Check if obj itself has data field with turnp2p message
-	if dMap, ok := obj["data"].(map[string]interface{}); ok {
-		if dt, _ := dMap["type"].(string); strings.HasPrefix(dt, "turnp2p_") {
-			s.handleTurnP2PData(dMap)
-			return
-		}
-	} else if dStr, ok := obj["data"].(string); ok {
-		var dMap map[string]interface{}
-		if dec, err := base64.StdEncoding.DecodeString(dStr); err == nil {
-			_ = json.Unmarshal(dec, &dMap)
-		} else {
-			_ = json.Unmarshal([]byte(dStr), &dMap)
-		}
-		if dt, _ := dMap["type"].(string); strings.HasPrefix(dt, "turnp2p_") {
-			s.handleTurnP2PData(dMap)
-			return
-		}
-	}
-
-	raw, _ := json.Marshal(obj)
-	if notifType != "" {
-		log.Printf("[Signaling] <<< VK notification=%q: %s", notifType, truncate(string(raw), 400))
-	} else if msgType != "response" {
-		log.Printf("[Signaling] <<< VK msg type=%q: %s", msgType, truncate(string(raw), 400))
-	}
-}
-
-func (s *SignalingClient) updateParticipantsFromConversation(conv map[string]interface{}) {
-	parts, ok := conv["participants"].([]interface{})
-	if !ok {
-		return
-	}
-
-	s.mu.Lock()
-	newPeers := 0
-	for _, p := range parts {
-		pmap, ok := p.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		pid := parseParticipantID(pmap["id"])
-		if pid == 0 {
-			continue
-		}
-		pType, _ := pmap["idType"].(string)
-		if pType == "" {
-			pType, _ = pmap["type"].(string)
-		}
-		if pType == "" || pType == "ANONYMOUS_USER" {
-			pType = "USER"
-		}
-
-		// Check if this participant is myself (match URL userId directly)
-		isSelf := false
-		if fmt.Sprintf("%d", pid) == s.myUserID || (s.myInternalID > 0 && pid == s.myInternalID) {
-			s.myInternalID = pid
-			isSelf = true
-		}
-		if ext, ok := pmap["externalId"].(map[string]interface{}); ok {
-			extID := fmt.Sprintf("%v", ext["id"])
-			if extID != "" && extID == s.myUserID {
-				s.myInternalID = pid
-				isSelf = true
-			}
-		}
-
-		if !isSelf && pid != s.myInternalID {
-			if _, exists := s.participants[pid]; !exists {
-				s.participants[pid] = pType
-				newPeers++
-			}
-		}
-	}
-	total := len(s.participants)
-	s.mu.Unlock()
-
-	if newPeers > 0 {
-		log.Printf("[Signaling] Discovered %d other participant(s) in call room (total: %d)", newPeers, total)
-		go s.broadcastAnnounce()
-	}
-}
-
-func (s *SignalingClient) handleTurnP2PData(obj map[string]interface{}) {
-	relay, _ := obj["relay"].(string)
-	if relay == s.localInfo.RelayAddr || relay == "" {
-		return
-	}
-
-	msgType, _ := obj["type"].(string)
-	switch msgType {
+	switch m.Type {
 	case "turnp2p_announce":
-		log.Printf("[Signaling] <<< Discovered peer relay via call channel: %s", relay)
+		// Immediate mutual announce reply to eliminate discovery latency
+		go s.broadcastAnnounce()
+
 		s.mu.Lock()
 		cb := s.onPeerAddr
 		s.mu.Unlock()
 		if cb != nil {
-			go cb(relay)
+			go cb(m.Relay)
+		}
+
+		// Also discover any additional parallel stream relays reported in payload
+		if m.Data != "" {
+			var pInfo SignalingPeerInfo
+			if err := json.Unmarshal([]byte(m.Data), &pInfo); err == nil && len(pInfo.RelayAddrs) > 0 {
+				for _, rAddr := range pInfo.RelayAddrs {
+					if rAddr != "" && rAddr != m.Relay && cb != nil {
+						go cb(rAddr)
+					}
+				}
+			}
 		}
 	case "turnp2p_frame":
-		hexData, _ := obj["data"].(string)
-		log.Printf("[Signaling] <<< Received turnp2p_frame from relay %s (%d hex chars)", relay, len(hexData))
-		if hexData != "" {
-			raw, err := hex.DecodeString(hexData)
-			if err == nil {
-				s.mu.Lock()
-				fCb := s.onFrame
-				s.mu.Unlock()
-				if fCb != nil {
-					log.Printf("[Signaling] Injecting %d bytes from %s into packet conn", len(raw), relay)
-					go fCb(raw, relay)
-				}
-			} else {
-				log.Printf("[Signaling] <<< turnp2p_frame hex decode error: %v", err)
+		if m.Target != "" && m.Target != s.localInfo.RelayAddr {
+			return // Not for us
+		}
+		rawFrame, err := hex.DecodeString(m.Data)
+		if err == nil {
+			s.mu.Lock()
+			fCb := s.onFrame
+			s.mu.Unlock()
+			if fCb != nil {
+				go fCb(rawFrame, m.Relay)
 			}
 		}
 	}
-}
-
-func parseParticipantID(val interface{}) int64 {
-	switch v := val.(type) {
-	case float64:
-		return int64(v)
-	case int64:
-		return v
-	case int:
-		return int64(v)
-	case string:
-		n, _ := strconv.ParseInt(v, 10, 64)
-		return n
-	default:
-		return 0
-	}
-}
-
-func truncate(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + "...[truncated]"
 }

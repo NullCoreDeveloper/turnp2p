@@ -85,9 +85,10 @@ type MeshNode struct {
 	peers       map[string]*Peer       // key: virtualIP
 	peersByID   map[string]*Peer       // key: peerID
 	peersByDom  map[string]*Peer       // key: domain (lowercase)
-	peerAddrs   map[string]net.Addr    // key: peerID -> remote relay net.Addr
-	lastPeerTs  map[string]int64       // key: peerAddr string -> last received timestamp
-	listeners   map[int]net.Listener   // key: port -> virtual listener
+	peerAddrs    map[string]net.Addr    // key: peerID -> remote relay net.Addr
+	pendingAddrs map[string]net.Addr    // key: addr string -> net.Addr for continuous discovery
+	lastPeerTs   map[string]int64       // key: peerAddr string -> last received timestamp
+	listeners    map[int]net.Listener   // key: port -> virtual listener
 	streams     map[uint32]*VirtualStream
 	streamSeq   atomic.Uint32
 	firewall    FirewallConfig
@@ -141,17 +142,18 @@ func NewMeshNode(name string, customDomain string, virtualIP string) *MeshNode {
 	}
 
 	return &MeshNode{
-		id:         uuid.New().String(),
-		name:       name,
-		virtualIP:  virtualIP,
-		domain:     domain,
-		peers:      make(map[string]*Peer),
-		peersByID:  make(map[string]*Peer),
-		peersByDom: make(map[string]*Peer),
-		peerAddrs:  make(map[string]net.Addr),
-		lastPeerTs: make(map[string]int64),
-		listeners:  make(map[int]net.Listener),
-		streams:    make(map[uint32]*VirtualStream),
+		id:           uuid.New().String(),
+		name:         name,
+		virtualIP:    virtualIP,
+		domain:       domain,
+		peers:        make(map[string]*Peer),
+		peersByID:    make(map[string]*Peer),
+		peersByDom:   make(map[string]*Peer),
+		peerAddrs:    make(map[string]net.Addr),
+		pendingAddrs: make(map[string]net.Addr),
+		lastPeerTs:   make(map[string]int64),
+		listeners:    make(map[int]net.Listener),
+		streams:      make(map[uint32]*VirtualStream),
 
 		firewall: FirewallConfig{
 			Mode:         FirewallModeWhitelist,
@@ -402,6 +404,7 @@ func (n *MeshNode) handleHeartbeat(payload []byte, addr net.Addr) {
 		}
 		peer.RelayAddr = addr.String()
 		n.peerAddrs[hb.ID] = addr
+		delete(n.pendingAddrs, addr.String())
 	}
 
 	if n.onPeerEvent != nil {
@@ -458,13 +461,17 @@ func (n *MeshNode) PingAddress(addr net.Addr) error {
 	return lastErr
 }
 
-// ConnectPeer resolves a remote address string and sends a discovery ping.
+// ConnectPeer resolves a remote address string, sends an initial ping, and adds it to pending continuous discovery.
 func (n *MeshNode) ConnectPeer(addrStr string) error {
 	addrStr = strings.TrimSpace(addrStr)
 	udpAddr, err := net.ResolveUDPAddr("udp", addrStr)
 	if err != nil {
 		return fmt.Errorf("invalid peer address: %w", err)
 	}
+
+	n.mu.Lock()
+	n.pendingAddrs[udpAddr.String()] = udpAddr
+	n.mu.Unlock()
 
 	// Send a single initial ping immediately
 	err = n.PingAddress(udpAddr)
@@ -482,8 +489,11 @@ func (n *MeshNode) heartbeatLoop() {
 			return
 		case <-ticker.C:
 			n.mu.RLock()
-			addrs := make([]net.Addr, 0, len(n.peerAddrs))
+			addrs := make([]net.Addr, 0, len(n.peerAddrs)+len(n.pendingAddrs))
 			for _, addr := range n.peerAddrs {
+				addrs = append(addrs, addr)
+			}
+			for _, addr := range n.pendingAddrs {
 				addrs = append(addrs, addr)
 			}
 			n.mu.RUnlock()

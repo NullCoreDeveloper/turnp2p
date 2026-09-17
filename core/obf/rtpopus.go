@@ -218,7 +218,6 @@ func (c *ObfuscatedPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 			return 0, addr, err
 		}
 
-		log.Printf("[obf] ReadFrom: %d bytes from %s (attempting decryption)", n, addr)
 		plain, err := c.obf.Unwrap(buf[:n])
 		if err != nil {
 			log.Printf("[obf] ReadFrom: received %d bytes from %s but decryption FAILED: %v", n, addr, err)
