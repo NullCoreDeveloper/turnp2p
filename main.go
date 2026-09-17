@@ -25,6 +25,10 @@ var iconPng []byte
 var iconIco []byte
 
 func main() {
+	if !ensureElevated() {
+		return
+	}
+
 	// Create an instance of the app structure
 	app := NewApp()
 
