@@ -50,12 +50,12 @@ type Obfuscator interface {
 
 // RTPOpus3 implements the rtpopus3 obfuscation profile matching WebRTC VK voice traffic.
 type RTPOpus3 struct {
-	aead         cipher.AEAD
-	ssrc         uint32
-	seq          atomic.Uint32
-	timestamp    atomic.Uint32
-	transportSeq atomic.Uint32
-	bufPool      sync.Pool
+	aead          cipher.AEAD
+	ssrc          uint32
+	seq           atomic.Uint32
+	timestamp     atomic.Uint32
+	packetCounter atomic.Uint64
+	bufPool       sync.Pool
 }
 
 // NewRTPOpus3 initializes an RTPOpus3 obfuscator with the given 32-byte key (or 64 hex chars / passphrase).
@@ -111,10 +111,10 @@ func NewRTPOpus3(keyHexOrBytes string) (*RTPOpus3, error) {
 func (o *RTPOpus3) Wrap(payload []byte) ([]byte, error) {
 	seq := uint16(o.seq.Add(1))
 	ts := o.timestamp.Add(OpusSamplesPerFrame)
-	transSeq := uint32(o.transportSeq.Add(1) & 0xFFFFFF)
+	counter := o.packetCounter.Add(1)
 
-	// Total header size: 12 (RTP) + 4 (Ext Header) + 2 (Ext 1) + 4 (Ext 2) + 2 (Padding) = 24 bytes
-	const headerSize = 24
+	// Total header size: 12 (RTP) + 4 (Ext Header) + 2 (Ext 1) + 9 (Ext 2) + 1 (Padding) = 28 bytes
+	const headerSize = 28
 	packet := make([]byte, headerSize+len(payload)+o.aead.Overhead())
 
 	// 1. RTP Header
@@ -126,31 +126,25 @@ func (o *RTPOpus3) Wrap(payload []byte) ([]byte, error) {
 
 	// 2. RFC 8285 Extension Header
 	binary.BigEndian.PutUint16(packet[12:14], RFC8285HeaderID)
-	binary.BigEndian.PutUint16(packet[14:16], 2) // 2 32-bit words follow (8 bytes)
+	binary.BigEndian.PutUint16(packet[14:16], 3) // 3 32-bit words follow (12 bytes)
 
 	// Ext 1: ID 1 (Audio level), Len 0 (1 byte data)
 	packet[16] = 0x10
 	packet[17] = 0x7F // Audio level
 
-	// Ext 2: ID 3 (Transport CC), Len 2 (3 bytes data)
-	packet[18] = 0x32
-	packet[19] = byte(transSeq >> 16)
-	packet[20] = byte(transSeq >> 8)
-	packet[21] = byte(transSeq)
+	// Ext 2: ID 3 (Packet Counter), Len 7 (8 bytes data)
+	packet[18] = 0x37
+	binary.BigEndian.PutUint64(packet[19:27], counter)
 
 	// Padding
-	packet[22] = 0x00
-	packet[23] = 0x00
+	packet[27] = 0x00
 
-	// 3. Construct 12-byte Nonce from SSRC (4b) + Timestamp (4b) + Seq (2b) + 0x0000 (2b)
+	// 3. Construct 12-byte Nonce from SSRC (4b) + PacketCounter (8b)
 	var nonce [12]byte
 	binary.BigEndian.PutUint32(nonce[0:4], o.ssrc)
-	binary.BigEndian.PutUint32(nonce[4:8], ts)
-	binary.BigEndian.PutUint16(nonce[8:10], seq)
-	nonce[10] = 0x00
-	nonce[11] = 0x00
+	binary.BigEndian.PutUint64(nonce[4:12], counter)
 
-	// 4. Encrypt payload with AEAD using the 24-byte header as AAD
+	// 4. Encrypt payload with AEAD using the 28-byte header as AAD
 	aad := packet[:headerSize]
 	o.aead.Seal(packet[:headerSize], nonce[:], payload, aad)
 
@@ -159,7 +153,7 @@ func (o *RTPOpus3) Wrap(payload []byte) ([]byte, error) {
 
 // Unwrap decodes and verifies an rtpopus3 packet.
 func (o *RTPOpus3) Unwrap(packet []byte) ([]byte, error) {
-	const headerSize = 24
+	const headerSize = 28
 	if len(packet) < headerSize+o.aead.Overhead() {
 		return nil, ErrInvalidPacket
 	}
@@ -180,15 +174,21 @@ func (o *RTPOpus3) Unwrap(packet []byte) ([]byte, error) {
 	}
 
 	seq := binary.BigEndian.Uint16(packet[2:4])
+	_ = seq // Ignored for nonce, but part of RTP header
 	ts := binary.BigEndian.Uint32(packet[4:8])
+	_ = ts
 	ssrc := binary.BigEndian.Uint32(packet[8:12])
+
+	// Read counter from Ext 2 (assuming fixed position per our Wrap logic)
+	// Ext 2 starts at byte 18: [18]=0x37, [19:27] = counter
+	if packet[18] != 0x37 {
+		return nil, ErrInvalidPacket
+	}
+	counter := binary.BigEndian.Uint64(packet[19:27])
 
 	var nonce [12]byte
 	binary.BigEndian.PutUint32(nonce[0:4], ssrc)
-	binary.BigEndian.PutUint32(nonce[4:8], ts)
-	binary.BigEndian.PutUint16(nonce[8:10], seq)
-	nonce[10] = 0x00
-	nonce[11] = 0x00
+	binary.BigEndian.PutUint64(nonce[4:12], counter)
 
 	aad := packet[:headerSize]
 	ciphertext := packet[headerSize:]

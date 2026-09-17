@@ -229,8 +229,8 @@ func (n *MeshNode) SendRawIP(targetVirtualIP string, ipPacket []byte) error {
 		return ErrNodeClosed
 	}
 
-	ip := net.ParseIP(targetVirtualIP)
-	if ip != nil && (ip.IsMulticast() || ip.Equal(net.IPv4bcast) || strings.HasSuffix(targetVirtualIP, ".255")) {
+	class := ClassifyIP(targetVirtualIP)
+	if class == IPClassBroadcast || class == IPClassMulticast {
 		return n.BroadcastRawIP(ipPacket)
 	}
 

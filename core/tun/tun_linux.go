@@ -107,7 +107,7 @@ func configureInterface(name string, virtualIP string) error {
 ip tuntap add dev %[1]s mode tun user %[2]s 2>/dev/null || true
 ip addr flush dev %[1]s 2>/dev/null || true
 ip addr add %[3]s/16 dev %[1]s
-ip link set dev %[1]s mtu 1280 up
+ip link set dev %[1]s mtu 1500 up
 ip route replace 10.42.0.0/16 dev %[1]s 2>/dev/null || true
 iptables -I INPUT -i %[1]s -j ACCEPT 2>/dev/null || true
 iptables -I FORWARD -i %[1]s -j ACCEPT 2>/dev/null || true

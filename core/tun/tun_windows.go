@@ -168,6 +168,13 @@ func OpenDevice(name string, virtualIP string) (Device, error) {
 	)
 	_ = cmdSetMetric.Run()
 
+	cmdSetMTU := exec.CommandContext(ctx, "netsh", "interface", "ipv4", "set", "subinterface",
+		fmt.Sprintf("name=%s", name),
+		"mtu=1500",
+		"store=persistent",
+	)
+	_ = cmdSetMTU.Run()
+
 	dev := &windowsDevice{
 		adapter: adapter,
 		session: session,

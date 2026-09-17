@@ -2,6 +2,7 @@ package tun
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"log"
 	"net"
@@ -93,18 +94,101 @@ func (r *Router) tunReadLoop() {
 			continue
 		}
 
-		// Destination IP: bytes 16..19 in IPv4 header
-		dstIP := net.IPv4(buf[16], buf[17], buf[18], buf[19]).String()
+		// Extract IPs from IPv4 header
+		srcIP := net.IPv4(buf[12], buf[13], buf[14], buf[15])
+		dstIPStr := net.IPv4(buf[16], buf[17], buf[18], buf[19]).String()
 
-		// Forward IPv4 packet into P2P mesh
+		class := p2p.ClassifyIP(dstIPStr)
+		if class == p2p.IPClassLocal || class == p2p.IPClassUnknown {
+			continue // Do not forward local or invalid packets to the mesh
+		}
+
+		// Forward IPv4 packet into P2P mesh, fragmenting if necessary (Safe MTU for TURN is ~1200)
 		packetData := make([]byte, n)
 		copy(packetData, buf[:n])
 
-		if err := r.node.SendRawIP(dstIP, packetData); err != nil {
-			r.logSendError(dstIP, err)
-			continue
+		// Perform SNAT for broadcast/multicast discovery packets originating from 0.0.0.0
+		if class == p2p.IPClassBroadcast || class == p2p.IPClassMulticast {
+			if srcIP.Equal(net.IPv4zero) {
+				_, _, myIP, _ := r.node.GetInfo()
+				parsedMyIP := net.ParseIP(myIP).To4()
+				if parsedMyIP != nil {
+					copy(packetData[12:16], parsedMyIP)
+					p2p.RecalculateIPv4Checksum(packetData)
+				}
+			}
+		}
+
+		fragments := fragmentIPv4(packetData, 1200)
+		for _, frag := range fragments {
+			if err := r.node.SendRawIP(dstIPStr, frag); err != nil {
+				r.logSendError(dstIPStr, err)
+			}
 		}
 	}
+}
+
+// fragmentIPv4 splits a large IPv4 packet into standard fragments if it exceeds the MTU.
+func fragmentIPv4(packet []byte, mtu int) [][]byte {
+	if len(packet) <= mtu {
+		return [][]byte{packet}
+	}
+
+	ihl := int(packet[0]&0x0F) * 4
+	if len(packet) < ihl {
+		return nil
+	}
+
+	maxPayload := ((mtu - ihl) / 8) * 8
+	if maxPayload <= 0 {
+		return nil // MTU too small
+	}
+
+	origPayload := packet[ihl:]
+	origFlags := binary.BigEndian.Uint16(packet[6:8])
+	origOffset := (origFlags & 0x1FFF) * 8
+
+	var fragments [][]byte
+
+	for offset := 0; offset < len(origPayload); offset += maxPayload {
+		chunkLen := maxPayload
+		if offset+chunkLen > len(origPayload) {
+			chunkLen = len(origPayload) - offset
+		}
+
+		frag := make([]byte, ihl+chunkLen)
+		copy(frag[:ihl], packet[:ihl])
+		copy(frag[ihl:], origPayload[offset:offset+chunkLen])
+
+		// Update Total Length
+		binary.BigEndian.PutUint16(frag[2:4], uint16(len(frag)))
+
+		// Update Flags and Fragment Offset
+		fragOffset := (int(origOffset) + offset) / 8
+		flags := origFlags & 0x8000 // preserve reserved bit
+		if offset+chunkLen < len(origPayload) || (origFlags&0x2000) != 0 {
+			flags |= 0x2000 // Set More Fragments (MF) flag
+		}
+		flags |= uint16(fragOffset & 0x1FFF)
+		binary.BigEndian.PutUint16(frag[6:8], flags)
+
+		// Recompute IP Checksum
+		frag[10] = 0
+		frag[11] = 0
+		var csum uint32
+		for i := 0; i < ihl; i += 2 {
+			csum += uint32(frag[i])<<8 | uint32(frag[i+1])
+		}
+		for csum > 0xffff {
+			csum = (csum >> 16) + (csum & 0xffff)
+		}
+		csum = ^csum
+		binary.BigEndian.PutUint16(frag[10:12], uint16(csum))
+
+		fragments = append(fragments, frag)
+	}
+
+	return fragments
 }
 
 func (r *Router) logSendError(dstIP string, err error) {
