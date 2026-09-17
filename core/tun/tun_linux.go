@@ -108,7 +108,12 @@ ip tuntap add dev %[1]s mode tun user %[2]s 2>/dev/null || true
 ip addr flush dev %[1]s 2>/dev/null || true
 ip addr add %[3]s/16 dev %[1]s
 ip link set dev %[1]s mtu 1280 up
-ip route replace 10.42.0.0/16 dev %[1]s 2>/dev/null || true`, name, currentUser, virtualIP)
+ip route replace 10.42.0.0/16 dev %[1]s 2>/dev/null || true
+iptables -I INPUT -i %[1]s -j ACCEPT 2>/dev/null || true
+iptables -I FORWARD -i %[1]s -j ACCEPT 2>/dev/null || true
+firewall-cmd --zone=trusted --add-interface=%[1]s 2>/dev/null || true
+ufw allow in on %[1]s 2>/dev/null || true
+sysctl -w net.ipv4.conf.%[1]s.rp_filter=0 2>/dev/null || true`, name, currentUser, virtualIP)
 
 	if os.Geteuid() == 0 {
 		return exec.Command("sh", "-c", script).Run()
@@ -178,8 +183,14 @@ func (d *linuxDevice) Close() error {
 	if d.file != nil {
 		closeErr = d.file.Close()
 	}
-	_ = exec.Command("ip", "link", "delete", "dev", d.name).Run()
-	_ = exec.Command("ip", "tuntap", "del", "dev", d.name, "mode", "tun").Run()
+	_ = exec.Command("sh", "-c", fmt.Sprintf(`
+iptables -D INPUT -i %[1]s -j ACCEPT 2>/dev/null || true
+iptables -D FORWARD -i %[1]s -j ACCEPT 2>/dev/null || true
+firewall-cmd --zone=trusted --remove-interface=%[1]s 2>/dev/null || true
+ufw delete allow in on %[1]s 2>/dev/null || true
+ip link delete dev %[1]s 2>/dev/null || true
+ip tuntap del dev %[1]s mode tun 2>/dev/null || true
+`, d.name)).Run()
 	return closeErr
 }
 

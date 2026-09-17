@@ -50,6 +50,7 @@ type SignalingClient struct {
 	onFrame      func(data []byte, fromRelay string)
 	localInfo    SignalingPeerInfo
 	lastAnnounce time.Time
+	seenSenders  sync.Map
 	ctx          context.Context
 	cancel       context.CancelFunc
 }
@@ -129,7 +130,7 @@ func (s *SignalingClient) Start(ctx context.Context, localInfo SignalingPeerInfo
 		}); tok.Wait() && tok.Error() != nil {
 			log.Printf("[Signaling] Subscribe error on %s: %v", topic, tok.Error())
 		}
-		s.broadcastAnnounce()
+		s.broadcastAnnounce(true)
 	}
 
 	opts.OnConnectionLost = func(c mqtt.Client, err error) {
@@ -173,18 +174,19 @@ func (s *SignalingClient) runLoop() {
 		case <-s.ctx.Done():
 			return
 		case <-ticker.C:
-			s.broadcastAnnounce()
+			s.broadcastAnnounce(false)
 		}
 	}
 }
 
-func (s *SignalingClient) broadcastAnnounce() {
+func (s *SignalingClient) broadcastAnnounce(force bool) {
 	s.mu.Lock()
-	if time.Since(s.lastAnnounce) < 2*time.Second {
+	now := time.Now()
+	if !force && now.Sub(s.lastAnnounce) < 2*time.Second {
 		s.mu.Unlock()
 		return
 	}
-	s.lastAnnounce = time.Now()
+	s.lastAnnounce = now
 	client := s.client
 	info := s.localInfo
 	s.mu.Unlock()
@@ -193,7 +195,7 @@ func (s *SignalingClient) broadcastAnnounce() {
 		return
 	}
 
-	info.Timestamp = time.Now().UnixMilli()
+	info.Timestamp = now.UnixMilli()
 	payload, _ := json.Marshal(info)
 
 	msg := mqttMsg{
@@ -211,7 +213,7 @@ func (s *SignalingClient) broadcastAnnounce() {
 
 	topic := fmt.Sprintf("turnp2p/room/%s", s.roomHash)
 	client.Publish(topic, 0, false, enc)
-	log.Printf("[Signaling] >>> Broadcast announce for room %s (relays: %d)", s.roomHash[:8], len(info.RelayAddrs))
+	log.Printf("[Signaling] >>> Broadcast announce for room %s (relays: %d, force: %v)", s.roomHash[:8], len(info.RelayAddrs), force)
 }
 
 func (s *SignalingClient) SendFrame(data []byte, targetAddr string) {
@@ -245,7 +247,7 @@ func (s *SignalingClient) SendFrame(data []byte, targetAddr string) {
 func (s *SignalingClient) handleMessage(payload []byte) {
 	raw, err := s.decrypt(payload)
 	if err != nil {
-		// Wrong encryption key or corrupt payload, ignore
+		log.Printf("[Signaling] Received encrypted packet in room %s but failed to decrypt: %v", s.roomHash[:8], err)
 		return
 	}
 
@@ -272,8 +274,26 @@ func (s *SignalingClient) handleMessage(payload []byte) {
 	switch m.Type {
 	case "turnp2p_announce":
 		log.Printf("[Signaling] <<< Received announce in room %s from sender %s (relay: %s)", m.Room[:8], m.Sender, m.Relay)
-		// Immediate mutual announce reply (rate-limited inside broadcastAnnounce)
-		go s.broadcastAnnounce()
+
+		// Check if we already replied to this sender recently
+		shouldReply := false
+		if m.Sender != "" {
+			now := time.Now()
+			if val, ok := s.seenSenders.Load(m.Sender); !ok {
+				s.seenSenders.Store(m.Sender, now)
+				shouldReply = true
+			} else if lastTime, ok := val.(time.Time); ok && now.Sub(lastTime) > 10*time.Second {
+				s.seenSenders.Store(m.Sender, now)
+				shouldReply = true
+			}
+		} else {
+			shouldReply = true
+		}
+
+		if shouldReply {
+			// Immediately reply to newcomer with force=true so they receive our relay address instantly!
+			go s.broadcastAnnounce(true)
+		}
 
 		s.mu.Lock()
 		cb := s.onPeerAddr
