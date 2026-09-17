@@ -60,7 +60,8 @@ export function App() {
   const [obfKey, setObfKey] = useState(() => localStorage.getItem('turnp2p_obfKey') || '');
   const [streamsCount, setStreamsCount] = useState<number>(() => {
     const saved = localStorage.getItem('turnp2p_streamsCount');
-    return saved ? Math.min(parseInt(saved, 10) || 3, 5) : 3;
+    const parsed = saved ? parseInt(saved, 10) : 0;
+    return parsed >= 1 ? Math.min(parsed, 30) : 10;
   });
   const [networkMode, setNetworkMode] = useState<'userspace' | 'tun'>(() => {
     const saved = localStorage.getItem('turnp2p_networkMode');
@@ -85,7 +86,7 @@ export function App() {
     domain: '',
     name: '',
     relayAddr: '',
-    streams: 3,
+    streams: 10,
     networkMode: 'tun',
     hostsSync: true,
     obfKey: '',

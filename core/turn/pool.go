@@ -477,10 +477,10 @@ func (m *MultiStreamPacketConn) SetWriteDeadline(t time.Time) error { return nil
 // AllocateMultiStreamClient creates N parallel TURN allocations across available TURN server IPs with rtpopus3 obfuscation.
 func AllocateMultiStreamClient(ctx context.Context, creds *Credentials, obfKey string, streamsCount int) (*MultiStreamPacketConn, error) {
 	if streamsCount <= 0 {
-		streamsCount = 3
+		streamsCount = 10
 	}
-	if streamsCount > 20 {
-		streamsCount = 20
+	if streamsCount > 30 {
+		streamsCount = 30
 	}
 
 	serverList := creds.ServerAddrs
