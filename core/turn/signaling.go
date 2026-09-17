@@ -6,6 +6,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -113,18 +114,21 @@ func (s *SignalingClient) Start(ctx context.Context, localInfo SignalingPeerInfo
 
 	opts := mqtt.NewClientOptions().
 		AddBroker("tcp://broker.emqx.io:1883").
-		AddBroker("tcp://test.mosquitto.org:1883")
+		AddBroker("wss://broker.emqx.io:8084/mqtt")
+	opts.SetTLSConfig(&tls.Config{InsecureSkipVerify: true})
 	opts.SetClientID(fmt.Sprintf("turnp2p-%s-%d", s.roomHash[:8], time.Now().UnixNano()))
 	opts.SetConnectRetry(true)
-	opts.SetConnectRetryInterval(5 * time.Second)
+	opts.SetConnectRetryInterval(3 * time.Second)
 	opts.SetConnectTimeout(5 * time.Second)
 
 	opts.OnConnect = func(c mqtt.Client) {
-		log.Printf("[Signaling] Connected to signaling broker for room %s", s.roomHash[:8])
+		log.Printf("[Signaling] Connected to signaling broker (broker.emqx.io) for room %s", s.roomHash[:8])
 		topic := fmt.Sprintf("turnp2p/room/%s", s.roomHash)
-		c.Subscribe(topic, 0, func(c mqtt.Client, m mqtt.Message) {
+		if tok := c.Subscribe(topic, 0, func(c mqtt.Client, m mqtt.Message) {
 			s.handleMessage(m.Payload())
-		})
+		}); tok.Wait() && tok.Error() != nil {
+			log.Printf("[Signaling] Subscribe error on %s: %v", topic, tok.Error())
+		}
 		s.broadcastAnnounce()
 	}
 
@@ -207,6 +211,7 @@ func (s *SignalingClient) broadcastAnnounce() {
 
 	topic := fmt.Sprintf("turnp2p/room/%s", s.roomHash)
 	client.Publish(topic, 0, false, enc)
+	log.Printf("[Signaling] >>> Broadcast announce for room %s (relays: %d)", s.roomHash[:8], len(info.RelayAddrs))
 }
 
 func (s *SignalingClient) SendFrame(data []byte, targetAddr string) {
@@ -266,6 +271,7 @@ func (s *SignalingClient) handleMessage(payload []byte) {
 
 	switch m.Type {
 	case "turnp2p_announce":
+		log.Printf("[Signaling] <<< Received announce in room %s from sender %s (relay: %s)", m.Room[:8], m.Sender, m.Relay)
 		// Immediate mutual announce reply (rate-limited inside broadcastAnnounce)
 		go s.broadcastAnnounce()
 
