@@ -32,6 +32,7 @@ type SignalingPeerInfo struct {
 type mqttMsg struct {
 	Type   string `json:"type"`
 	Room   string `json:"room"`
+	Sender string `json:"sender,omitempty"`
 	Data   string `json:"data"`
 	Relay  string `json:"relay"`
 	Target string `json:"target,omitempty"`
@@ -39,16 +40,17 @@ type mqttMsg struct {
 
 // SignalingClient manages MQTT connection for peer exchange.
 type SignalingClient struct {
-	roomHash   string
-	obfKey     string
-	aesGCM     cipher.AEAD
-	client     mqtt.Client
-	mu         sync.Mutex
-	onPeerAddr func(relayAddr string)
-	onFrame    func(data []byte, fromRelay string)
-	localInfo  SignalingPeerInfo
-	ctx        context.Context
-	cancel     context.CancelFunc
+	roomHash     string
+	obfKey       string
+	aesGCM       cipher.AEAD
+	client       mqtt.Client
+	mu           sync.Mutex
+	onPeerAddr   func(relayAddr string)
+	onFrame      func(data []byte, fromRelay string)
+	localInfo    SignalingPeerInfo
+	lastAnnounce time.Time
+	ctx          context.Context
+	cancel       context.CancelFunc
 }
 
 // NewSignalingClient creates a new MQTT signaling channel client with AES-GCM encryption.
@@ -107,27 +109,42 @@ func (s *SignalingClient) Start(ctx context.Context, localInfo SignalingPeerInfo
 	s.ctx, s.cancel = context.WithCancel(ctx)
 	s.mu.Unlock()
 
-	opts := mqtt.NewClientOptions().AddBroker("tcp://broker.emqx.io:1883")
+	log.Printf("[Signaling] Initializing signaling channel for room %s...", s.roomHash[:8])
+
+	opts := mqtt.NewClientOptions().
+		AddBroker("tcp://broker.emqx.io:1883").
+		AddBroker("tcp://test.mosquitto.org:1883")
 	opts.SetClientID(fmt.Sprintf("turnp2p-%s-%d", s.roomHash[:8], time.Now().UnixNano()))
 	opts.SetConnectRetry(true)
 	opts.SetConnectRetryInterval(5 * time.Second)
+	opts.SetConnectTimeout(5 * time.Second)
 
 	opts.OnConnect = func(c mqtt.Client) {
-		log.Printf("[Signaling] Connected to MQTT broker (broker.emqx.io)")
+		log.Printf("[Signaling] Connected to signaling broker for room %s", s.roomHash[:8])
 		topic := fmt.Sprintf("turnp2p/room/%s", s.roomHash)
-		c.Subscribe(topic, 1, func(c mqtt.Client, m mqtt.Message) {
+		c.Subscribe(topic, 0, func(c mqtt.Client, m mqtt.Message) {
 			s.handleMessage(m.Payload())
 		})
 		s.broadcastAnnounce()
 	}
 
-	client := mqtt.NewClient(opts)
-	if token := client.Connect(); token.Wait() && token.Error() != nil {
-		log.Printf("[Signaling] MQTT connect error: %v", token.Error())
+	opts.OnConnectionLost = func(c mqtt.Client, err error) {
+		log.Printf("[Signaling] Signaling connection lost: %v", err)
 	}
+
+	client := mqtt.NewClient(opts)
 	s.mu.Lock()
 	s.client = client
 	s.mu.Unlock()
+
+	go func() {
+		token := client.Connect()
+		if !token.WaitTimeout(6 * time.Second) {
+			log.Printf("[Signaling] Initial connect timed out, retrying in background...")
+		} else if token.Error() != nil {
+			log.Printf("[Signaling] Initial connect error: %v (auto-reconnecting in background...)", token.Error())
+		}
+	}()
 
 	go s.runLoop()
 }
@@ -145,7 +162,7 @@ func (s *SignalingClient) Stop() {
 }
 
 func (s *SignalingClient) runLoop() {
-	ticker := time.NewTicker(3 * time.Second)
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
@@ -159,6 +176,11 @@ func (s *SignalingClient) runLoop() {
 
 func (s *SignalingClient) broadcastAnnounce() {
 	s.mu.Lock()
+	if time.Since(s.lastAnnounce) < 2*time.Second {
+		s.mu.Unlock()
+		return
+	}
+	s.lastAnnounce = time.Now()
 	client := s.client
 	info := s.localInfo
 	s.mu.Unlock()
@@ -171,10 +193,11 @@ func (s *SignalingClient) broadcastAnnounce() {
 	payload, _ := json.Marshal(info)
 
 	msg := mqttMsg{
-		Type:  "turnp2p_announce",
-		Room:  s.roomHash,
-		Data:  string(payload),
-		Relay: info.RelayAddr,
+		Type:   "turnp2p_announce",
+		Room:   s.roomHash,
+		Sender: info.ID,
+		Data:   string(payload),
+		Relay:  info.RelayAddr,
 	}
 	raw, _ := json.Marshal(msg)
 	enc, err := s.encrypt(raw)
@@ -199,6 +222,7 @@ func (s *SignalingClient) SendFrame(data []byte, targetAddr string) {
 	msg := mqttMsg{
 		Type:   "turnp2p_frame",
 		Room:   s.roomHash,
+		Sender: info.ID,
 		Relay:  info.RelayAddr,
 		Target: targetAddr,
 		Data:   hex.EncodeToString(data),
@@ -225,13 +249,24 @@ func (s *SignalingClient) handleMessage(payload []byte) {
 		return
 	}
 
-	if m.Room != s.roomHash || m.Relay == s.localInfo.RelayAddr || m.Relay == "" {
+	s.mu.Lock()
+	localID := s.localInfo.ID
+	localRelay := s.localInfo.RelayAddr
+	localRelays := s.localInfo.RelayAddrs
+	s.mu.Unlock()
+
+	if m.Room != s.roomHash || (m.Sender != "" && m.Sender == localID) || m.Relay == localRelay || m.Relay == "" {
 		return
+	}
+	for _, rAddr := range localRelays {
+		if rAddr != "" && m.Relay == rAddr {
+			return
+		}
 	}
 
 	switch m.Type {
 	case "turnp2p_announce":
-		// Immediate mutual announce reply to eliminate discovery latency
+		// Immediate mutual announce reply (rate-limited inside broadcastAnnounce)
 		go s.broadcastAnnounce()
 
 		s.mu.Lock()

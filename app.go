@@ -331,10 +331,15 @@ func (a *App) JoinNetwork(vkLink string, nickname string, customDomain string, o
 		}
 		var knownRelays sync.Map
 		sig.Start(context.Background(), localInfo, func(peerRelayAddr string) {
-			if _, loaded := knownRelays.LoadOrStore(peerRelayAddr, true); loaded {
-				return
+			now := time.Now()
+			if val, ok := knownRelays.Load(peerRelayAddr); ok {
+				if lastTime, ok := val.(time.Time); ok && now.Sub(lastTime) < 15*time.Second {
+					return
+				}
 			}
-			log.Printf("[App] Discovered new peer relay via signaling: %s, connecting...", peerRelayAddr)
+			knownRelays.Store(peerRelayAddr, now)
+
+			log.Printf("[App] Discovered peer relay via signaling: %s, connecting...", peerRelayAddr)
 			host, _, _ := net.SplitHostPort(peerRelayAddr)
 			if ip := net.ParseIP(host); ip != nil {
 				bondedPacketConn.EnsurePermission(ip)

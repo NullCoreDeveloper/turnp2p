@@ -217,9 +217,15 @@ func (n *MeshNode) SetRawIPHandler(cb func(ipPacket []byte)) {
 }
 
 // SendRawIP routes an IPv4 packet to the destination virtual IP or domain.
+// If the destination is a multicast or broadcast address, it broadcasts to all active mesh peers.
 func (n *MeshNode) SendRawIP(targetVirtualIP string, ipPacket []byte) error {
 	if !n.running.Load() {
 		return ErrNodeClosed
+	}
+
+	ip := net.ParseIP(targetVirtualIP)
+	if ip != nil && (ip.IsMulticast() || ip.Equal(net.IPv4bcast) || strings.HasSuffix(targetVirtualIP, ".255")) {
+		return n.BroadcastRawIP(ipPacket)
 	}
 
 	n.mu.RLock()
@@ -240,6 +246,33 @@ func (n *MeshNode) SendRawIP(targetVirtualIP string, ipPacket []byte) error {
 
 	_, err := n.packetConn.WriteTo(frame, peerAddr)
 	return err
+}
+
+// BroadcastRawIP broadcasts an IPv4 packet to all active peers in the mesh.
+func (n *MeshNode) BroadcastRawIP(ipPacket []byte) error {
+	if !n.running.Load() {
+		return ErrNodeClosed
+	}
+
+	n.mu.RLock()
+	var addrs []net.Addr
+	for _, addr := range n.peerAddrs {
+		addrs = append(addrs, addr)
+	}
+	n.mu.RUnlock()
+
+	if len(addrs) == 0 {
+		return nil // No peers connected yet, silently drop
+	}
+
+	frame := make([]byte, 1+len(ipPacket))
+	frame[0] = FrameRawIP
+	copy(frame[1:], ipPacket)
+
+	for _, addr := range addrs {
+		_, _ = n.packetConn.WriteTo(frame, addr)
+	}
+	return nil
 }
 
 // Start binds the node to the obfuscated TURN packet connection and begins heartbeat discovery.

@@ -3,6 +3,7 @@ package obf
 import (
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"log"
 	"math/big"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -56,23 +58,25 @@ type RTPOpus3 struct {
 	bufPool      sync.Pool
 }
 
-// NewRTPOpus3 initializes an RTPOpus3 obfuscator with the given 32-byte key (or 64 hex chars).
+// NewRTPOpus3 initializes an RTPOpus3 obfuscator with the given 32-byte key (or 64 hex chars / passphrase).
 func NewRTPOpus3(keyHexOrBytes string) (*RTPOpus3, error) {
 	var key []byte
 	var err error
 
+	keyHexOrBytes = strings.TrimSpace(keyHexOrBytes)
 	if len(keyHexOrBytes) == 64 {
 		key, err = hex.DecodeString(keyHexOrBytes)
 		if err != nil {
-			return nil, fmt.Errorf("invalid hex key: %w", err)
+			key = nil
 		}
-	} else if len(keyHexOrBytes) == 32 {
+	}
+	if len(key) == 0 && len(keyHexOrBytes) == 32 {
 		key = []byte(keyHexOrBytes)
-	} else {
-		key = make([]byte, chacha20poly1305.KeySize)
-		if _, err := rand.Read(key); err != nil {
-			return nil, err
-		}
+	}
+	if len(key) == 0 {
+		// Deterministically derive 32-byte ChaCha20 key from any passphrase or string
+		h := sha256.Sum256([]byte(keyHexOrBytes))
+		key = h[:]
 	}
 
 	aead, err := chacha20poly1305.New(key)

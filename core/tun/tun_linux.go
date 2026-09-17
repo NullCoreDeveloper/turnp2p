@@ -3,10 +3,14 @@
 package tun
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -29,10 +33,61 @@ type linuxDevice struct {
 	ip   string
 }
 
+// EnsureCapabilities checks if the current binary has CAP_NET_ADMIN.
+// If not, it requests elevation once via pkexec to setcap cap_net_admin,cap_net_raw+eip on itself.
+func EnsureCapabilities() error {
+	if os.Geteuid() == 0 {
+		return nil
+	}
+
+	// 1. Check if we can already open /dev/net/tun directly
+	fd, err := syscall.Open("/dev/net/tun", os.O_RDWR, 0)
+	if err == nil {
+		var req ifreq
+		req.Flags = cIFF_TUN | cIFF_NO_PI
+		copy(req.Name[:], []byte("turnp2ptest%d"))
+		_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), uintptr(unix.TUNSETIFF), uintptr(unsafe.Pointer(&req)))
+		_ = syscall.Close(fd)
+		if errno == 0 {
+			// Already has capabilities, raise ambient capability so child tools (ip) inherit it
+			_ = unix.Prctl(unix.PR_CAP_AMBIENT, unix.PR_CAP_AMBIENT_RAISE, uintptr(unix.CAP_NET_ADMIN), 0, 0)
+			return nil
+		}
+	}
+
+	// 2. We lack capabilities, find path to self
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("cannot determine executable path: %w", err)
+	}
+	exe, err = filepath.EvalSymlinks(exe)
+	if err != nil {
+		return fmt.Errorf("cannot resolve executable path: %w", err)
+	}
+
+	log.Printf("[TUN] Requesting cap_net_admin,cap_net_raw for %s via pkexec...", exe)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "pkexec", "setcap", "cap_net_admin,cap_net_raw+eip", exe)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to grant capabilities via pkexec: %w", err)
+	}
+
+	log.Printf("[TUN] Successfully granted network capabilities to %s!", exe)
+	_ = unix.Prctl(unix.PR_CAP_AMBIENT, unix.PR_CAP_AMBIENT_RAISE, uintptr(unix.CAP_NET_ADMIN), 0, 0)
+	return nil
+}
+
 // OpenDevice creates and configures a Linux TUN interface (e.g. turnp2p0) with assigned virtual IP.
 func OpenDevice(name string, virtualIP string) (Device, error) {
 	if name == "" {
 		name = "turnp2p0"
+	}
+
+	// Try to ensure capabilities first
+	if capErr := EnsureCapabilities(); capErr != nil {
+		log.Printf("[TUN] EnsureCapabilities warning: %v", capErr)
 	}
 
 	if err := configureInterface(name, virtualIP); err != nil {
@@ -48,7 +103,8 @@ func configureInterface(name string, virtualIP string) error {
 		currentUser = "root"
 	}
 
-	script := fmt.Sprintf(`ip tuntap add dev %[1]s mode tun user %[2]s 2>/dev/null || true
+	script := fmt.Sprintf(`set -e
+ip tuntap add dev %[1]s mode tun user %[2]s 2>/dev/null || true
 ip addr flush dev %[1]s 2>/dev/null || true
 ip addr add %[3]s/16 dev %[1]s
 ip link set dev %[1]s mtu 1280 up
@@ -58,13 +114,21 @@ ip route replace 10.42.0.0/16 dev %[1]s 2>/dev/null || true`, name, currentUser,
 		return exec.Command("sh", "-c", script).Run()
 	}
 
-	// Try without pkexec first (in case user has capabilities or sudo rules)
-	if err := exec.Command("sh", "-c", script).Run(); err == nil {
+	// Raise ambient capability so child processes (ip) inherit CAP_NET_ADMIN
+	_ = unix.Prctl(unix.PR_CAP_AMBIENT, unix.PR_CAP_AMBIENT_RAISE, uintptr(unix.CAP_NET_ADMIN), 0, 0)
+
+	// Try without pkexec first
+	ctxDirect, cancelDirect := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelDirect()
+	if err := exec.CommandContext(ctxDirect, "sh", "-c", script).Run(); err == nil {
 		return nil
 	}
 
-	// Elevate via pkexec
-	cmd := exec.Command("pkexec", "sh", "-c", script)
+	// Elevate via pkexec with strict timeout to prevent hangs
+	ctxPk, cancelPk := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancelPk()
+
+	cmd := exec.CommandContext(ctxPk, "pkexec", "sh", "-c", script)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to configure TUN interface %s via pkexec: %w", name, err)
 	}

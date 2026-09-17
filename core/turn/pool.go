@@ -386,11 +386,12 @@ func (m *MultiStreamPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 				firstErr = err
 			}
 		}
-		if sender != nil && addr != nil {
-			sender(p, addr.String())
-		}
 		if sentBytes > 0 {
 			return sentBytes, nil
+		}
+		if sender != nil && addr != nil {
+			sender(p, addr.String())
+			return len(p), nil
 		}
 		return 0, firstErr
 	}
