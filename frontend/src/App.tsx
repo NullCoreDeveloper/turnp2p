@@ -60,7 +60,11 @@ export function App() {
   const [obfKey, setObfKey] = useState(() => localStorage.getItem('turnp2p_obfKey') || '');
   const [streamsCount, setStreamsCount] = useState<number>(() => {
     const saved = localStorage.getItem('turnp2p_streamsCount');
-    const parsed = saved ? parseInt(saved, 10) : 0;
+    if (!saved || saved === '5') {
+      localStorage.setItem('turnp2p_streamsCount', '10');
+      return 10;
+    }
+    const parsed = parseInt(saved, 10);
     return parsed >= 1 ? Math.min(parsed, 30) : 10;
   });
   const [networkMode, setNetworkMode] = useState<'userspace' | 'tun'>(() => {
