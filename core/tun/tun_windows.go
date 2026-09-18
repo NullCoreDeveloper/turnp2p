@@ -109,6 +109,12 @@ func (d *windowsDevice) Close() error {
 	if d.closed.Swap(true) {
 		return nil
 	}
+	// Clean up firewall rules
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_ = exec.CommandContext(ctx, "netsh", "advfirewall", "firewall", "delete", "rule", "name=TurnP2P-Mesh-Inbound").Run()
+	_ = exec.CommandContext(ctx, "netsh", "advfirewall", "firewall", "delete", "rule", "name=TurnP2P-ICMPv4-Inbound").Run()
+
 	d.session.End()
 	return d.adapter.Close()
 }
@@ -175,6 +181,42 @@ func OpenDevice(name string, virtualIP string) (Device, error) {
 	)
 	_ = cmdSetMTU.Run()
 
+	// 4. Configure Windows Firewall and Network Profile
+	// Set network category to Private so Windows treats turnp2p0 as a trusted local LAN
+	cmdSetPrivate := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+		fmt.Sprintf("Get-NetConnectionProfile -InterfaceAlias '%s' | Set-NetConnectionProfile -NetworkCategory Private", name),
+	)
+	_ = cmdSetPrivate.Run()
+
+	// Clean up old rules if exist
+	_ = exec.CommandContext(ctx, "netsh", "advfirewall", "firewall", "delete", "rule", "name=TurnP2P-Mesh-Inbound").Run()
+	_ = exec.CommandContext(ctx, "netsh", "advfirewall", "firewall", "delete", "rule", "name=TurnP2P-ICMPv4-Inbound").Run()
+
+	// Allow all inbound traffic from TurnP2P subnet (10.42.0.0/16) across all profiles
+	cmdAllowMesh := exec.CommandContext(ctx, "netsh", "advfirewall", "firewall", "add", "rule",
+		"name=TurnP2P-Mesh-Inbound",
+		"dir=in",
+		"action=allow",
+		"remoteip=10.42.0.0/16",
+		"enable=yes",
+		"profile=any",
+	)
+	if out, err := cmdAllowMesh.CombinedOutput(); err != nil {
+		log.Printf("[Wintun] firewall allow mesh warning: %v (out: %s)", err, string(out))
+	}
+
+	// Allow ICMPv4 (ping) from TurnP2P subnet
+	cmdAllowICMP := exec.CommandContext(ctx, "netsh", "advfirewall", "firewall", "add", "rule",
+		"name=TurnP2P-ICMPv4-Inbound",
+		"dir=in",
+		"action=allow",
+		"protocol=icmpv4:8,any",
+		"remoteip=10.42.0.0/16",
+		"enable=yes",
+		"profile=any",
+	)
+	_ = cmdAllowICMP.Run()
+
 	dev := &windowsDevice{
 		adapter: adapter,
 		session: session,
@@ -182,6 +224,6 @@ func OpenDevice(name string, virtualIP string) (Device, error) {
 		ip:      virtualIP,
 	}
 
-	log.Printf("[Wintun] Adapter %s initialized with IP %s/16", name, virtualIP)
+	log.Printf("[Wintun] Adapter %s initialized with IP %s/16 (Firewall rules configured)", name, virtualIP)
 	return dev, nil
 }
