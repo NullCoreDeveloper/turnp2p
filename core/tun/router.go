@@ -119,7 +119,8 @@ func (r *Router) tunReadLoop() {
 			}
 		}
 
-		fragments := fragmentIPv4(packetData, 1200)
+		// Forward IPv4 packet into P2P mesh, fragmenting if necessary (Safe MTU for TURN is ~1380)
+		fragments := fragmentIPv4(packetData, 1380)
 		for _, frag := range fragments {
 			if err := r.node.SendRawIP(dstIPStr, frag); err != nil {
 				r.logSendError(dstIPStr, err)

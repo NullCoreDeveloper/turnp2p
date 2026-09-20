@@ -94,6 +94,8 @@ type MeshNode struct {
 	streams     map[uint32]*VirtualStream
 	streamSeq   atomic.Uint32
 	firewall    FirewallConfig
+	udpConntrack map[int]time.Time // key: localPort -> last seen
+	udpConnMu    sync.Mutex
 	ctx         context.Context
 	cancel      context.CancelFunc
 	mu          sync.RWMutex
@@ -140,11 +142,9 @@ func NewMeshNode(name string, customDomain string, virtualIP string) *MeshNode {
 		virtualIP = fmt.Sprintf("10.42.%d.%d", b[0], b[1])
 	}
 
-	var domain string
-	if customDomain != "" {
-		domain = SanitizeDomain(customDomain)
-	} else {
-		domain = SanitizeDomain(name)
+	domain := SanitizeDomain(customDomain)
+	if domain == "" {
+		domain = strings.ToLower(name) + ".vkturn"
 	}
 
 	return &MeshNode{
@@ -160,6 +160,7 @@ func NewMeshNode(name string, customDomain string, virtualIP string) *MeshNode {
 		lastPeerTs:   make(map[string]int64),
 		listeners:    make(map[int]net.Listener),
 		streams:      make(map[uint32]*VirtualStream),
+		udpConntrack: make(map[int]time.Time),
 
 		firewall: FirewallConfig{
 			Mode:         FirewallModeWhitelist,
@@ -229,6 +230,15 @@ func (n *MeshNode) SendRawIP(targetVirtualIP string, ipPacket []byte) error {
 		return ErrNodeClosed
 	}
 
+	// Stateful UDP conntrack: record source port for return traffic
+	if len(ipPacket) >= 20 && (ipPacket[0]>>4) == 4 && ipPacket[9] == 17 {
+		ihl := int(ipPacket[0]&0x0F) * 4
+		if len(ipPacket) >= ihl+4 {
+			srcPort := int(binary.BigEndian.Uint16(ipPacket[ihl : ihl+2]))
+			n.trackOutboundUDP(srcPort)
+		}
+	}
+
 	class := ClassifyIP(targetVirtualIP)
 	if class == IPClassBroadcast || class == IPClassMulticast {
 		return n.BroadcastRawIP(ipPacket)
@@ -258,6 +268,15 @@ func (n *MeshNode) SendRawIP(targetVirtualIP string, ipPacket []byte) error {
 func (n *MeshNode) BroadcastRawIP(ipPacket []byte) error {
 	if !n.running.Load() {
 		return ErrNodeClosed
+	}
+
+	// Stateful UDP conntrack: record source port for return traffic
+	if len(ipPacket) >= 20 && (ipPacket[0]>>4) == 4 && ipPacket[9] == 17 {
+		ihl := int(ipPacket[0]&0x0F) * 4
+		if len(ipPacket) >= ihl+4 {
+			srcPort := int(binary.BigEndian.Uint16(ipPacket[ihl : ihl+2]))
+			n.trackOutboundUDP(srcPort)
+		}
 	}
 
 	n.mu.RLock()
@@ -643,6 +662,40 @@ func (n *MeshNode) Dial(ctx context.Context, targetAddress string, targetPort in
 	}
 }
 
+func (n *MeshNode) trackOutboundUDP(port int) {
+	n.udpConnMu.Lock()
+	defer n.udpConnMu.Unlock()
+	if n.udpConntrack == nil {
+		n.udpConntrack = make(map[int]time.Time)
+	}
+	n.udpConntrack[port] = time.Now()
+	if len(n.udpConntrack) > 512 {
+		now := time.Now()
+		for p, ts := range n.udpConntrack {
+			if now.Sub(ts) > 60*time.Second {
+				delete(n.udpConntrack, p)
+			}
+		}
+	}
+}
+
+func (n *MeshNode) isOutboundUDP(port int) bool {
+	n.udpConnMu.Lock()
+	defer n.udpConnMu.Unlock()
+	if n.udpConntrack == nil {
+		return false
+	}
+	ts, exists := n.udpConntrack[port]
+	if !exists {
+		return false
+	}
+	if time.Since(ts) > 60*time.Second {
+		delete(n.udpConntrack, port)
+		return false
+	}
+	return true
+}
+
 // isRawIPAllowed inspects an incoming L3 IPv4 packet against the L4 firewall policy.
 func (n *MeshNode) isRawIPAllowed(ipPacket []byte) bool {
 	if len(ipPacket) < 20 {
@@ -650,6 +703,17 @@ func (n *MeshNode) isRawIPAllowed(ipPacket []byte) bool {
 	}
 	// Verify IPv4
 	if ipPacket[0]>>4 != 4 {
+		return true
+	}
+
+	// Fragment Offset check:
+	// In IPv4 header, bytes 6..7 contain Flags (3 bits) and Fragment Offset (13 bits).
+	flagsAndOffset := binary.BigEndian.Uint16(ipPacket[6:8])
+	fragOffset := (flagsAndOffset & 0x1FFF) * 8
+	if fragOffset > 0 {
+		// Non-initial fragment: does not contain an L4 header (TCP/UDP ports or flags).
+		// The initial fragment (fragOffset == 0) was already inspected.
+		// Never drop subsequent fragments as "unauthorized ports" or "fake SYN".
 		return true
 	}
 
@@ -678,7 +742,7 @@ func (n *MeshNode) isRawIPAllowed(ipPacket []byte) bool {
 		dstPort := int(binary.BigEndian.Uint16(ipPacket[ihl+2 : ihl+4]))
 
 		if mode == FirewallModeBlockAll {
-			// In block_all mode, reject all inbound TCP SYN and inbound UDP
+			// In block_all mode, reject all inbound TCP SYN and inbound UDP (unless reply to outbound UDP)
 			if proto == 6 && len(ipPacket) >= ihl+14 {
 				tcpFlags := ipPacket[ihl+13]
 				isSyn := (tcpFlags & 0x02) != 0
@@ -688,8 +752,10 @@ func (n *MeshNode) isRawIPAllowed(ipPacket []byte) bool {
 					return false
 				}
 			} else if proto == 17 {
-				log.Printf("[Firewall TUN] Blocked inbound UDP packet to port %d (Policy: block_all)", dstPort)
-				return false
+				if !n.isOutboundUDP(dstPort) {
+					log.Printf("[Firewall TUN] Blocked inbound UDP packet to port %d (Policy: block_all)", dstPort)
+					return false
+				}
 			}
 			return true
 		}
@@ -707,9 +773,10 @@ func (n *MeshNode) isRawIPAllowed(ipPacket []byte) bool {
 						return false
 					}
 				} else if proto == 17 {
-					// Drop inbound UDP to unshared port
-					log.Printf("[Firewall TUN] Rejected inbound UDP packet to port %d (Not in whitelist)", dstPort)
-					return false
+					// Allow if this is a response to our outbound UDP request (e.g. voice chat or DNS)
+					if !n.isOutboundUDP(dstPort) {
+						return false
+					}
 				}
 			}
 		}

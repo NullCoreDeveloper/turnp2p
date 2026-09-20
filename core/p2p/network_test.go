@@ -189,12 +189,14 @@ func TestP2PDomainAnnouncementAndDynamicUpdate(t *testing.T) {
 		t.Fatalf("expected updated domain craft-server.vkturn, got %s", peersB[0].Domain)
 	}
 
-	// Start Minecraft dummy service on Node A
-	localMC, err := net.Listen("tcp", "127.0.0.1:25565")
+	// Start dummy service on Node A with a free port
+	localMC, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("listen 25565: %v", err)
+		t.Fatalf("listen: %v", err)
 	}
 	defer localMC.Close()
+	mcPort := localMC.Addr().(*net.TCPAddr).Port
+	nodeA.AllowPort(mcPort)
 
 	go func() {
 		conn, err := localMC.Accept()
@@ -208,7 +210,7 @@ func TestP2PDomainAnnouncementAndDynamicUpdate(t *testing.T) {
 	}()
 
 	// Connect using the newly updated domain name "craft-server.vkturn"
-	stream, err := nodeB.Dial(ctx, "craft-server.vkturn", 25565)
+	stream, err := nodeB.Dial(ctx, "craft-server.vkturn", mcPort)
 	if err != nil {
 		t.Fatalf("failed to dial craft-server.vkturn: %v", err)
 	}
@@ -373,6 +375,42 @@ func TestP2PRawIPFirewall(t *testing.T) {
 	node.SetFirewallMode(FirewallModeAllowAll)
 	if !node.isRawIPAllowed(pkt) {
 		t.Errorf("expected port 8080 to be allowed under allow_all")
+	}
+
+	// 5. Subsequent IP fragment (fragOffset > 0):
+	// Must ALWAYS be allowed, even if payload bytes resemble TCP SYN or unauthorized UDP
+	node.SetFirewallMode(FirewallModeWhitelist)
+	fragPkt := make([]byte, 40)
+	fragPkt[0] = 0x45
+	fragPkt[9] = 6 // TCP
+	// Set fragment offset = 147 (bytes 6-7: 0x0093)
+	fragPkt[6] = 0x00
+	fragPkt[7] = 0x93
+	// Offset ihl+13 has 0x02 (SYN flag), ihl+2..4 has port 9999
+	fragPkt[22] = 0x27
+	fragPkt[23] = 0x0F
+	fragPkt[33] = 0x02 // Fake SYN byte in chunk payload!
+	if !node.isRawIPAllowed(fragPkt) {
+		t.Errorf("expected IP fragment with fragOffset > 0 to be allowed unconditionally")
+	}
+
+	// 6. Stateful UDP conntrack:
+	// A response to our outbound UDP request on port 49152 must be allowed
+	udpReplyPkt := make([]byte, 28)
+	udpReplyPkt[0] = 0x45
+	udpReplyPkt[9] = 17 // UDP
+	// Dest port 49152 (0xC000)
+	udpReplyPkt[22] = 0xC0
+	udpReplyPkt[23] = 0x00
+
+	if node.isRawIPAllowed(udpReplyPkt) {
+		t.Errorf("expected unrequested UDP to port 49152 to be blocked initially")
+	}
+
+	// Record outbound request from port 49152
+	node.trackOutboundUDP(49152)
+	if !node.isRawIPAllowed(udpReplyPkt) {
+		t.Errorf("expected UDP response to port 49152 to be allowed via conntrack")
 	}
 }
 

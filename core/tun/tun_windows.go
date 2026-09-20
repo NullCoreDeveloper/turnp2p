@@ -176,7 +176,7 @@ func OpenDevice(name string, virtualIP string) (Device, error) {
 
 	cmdSetMTU := exec.CommandContext(ctx, "netsh", "interface", "ipv4", "set", "subinterface",
 		fmt.Sprintf("name=%s", name),
-		"mtu=1500",
+		"mtu=1380",
 		"store=persistent",
 	)
 	_ = cmdSetMTU.Run()
