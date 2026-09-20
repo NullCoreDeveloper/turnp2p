@@ -27,4 +27,7 @@ type VKCredentials struct {
 var DefaultVKCredentials = []VKCredentials{
 	{ClientID: "6287487", ClientSecret: "QbYic1K3lEV5kTGiqlq2", Name: "VK_WEB_APP"},
 	{ClientID: "7879029", ClientSecret: "aR5NKGmm03GYrCiNKsaw", Name: "VK_MVK_APP"},
+	{ClientID: "52461373", ClientSecret: "o557NLIkAErNhakXrQ7A", Name: "VK_WEB_VKVIDEO"},
+	{ClientID: "52649896", ClientSecret: "WStp4ihWG4l3nmXZgIbC", Name: "VK_MVK_VKVIDEO"},
+	{ClientID: "51781872", ClientSecret: "IjjCNl4L4Tf5QZEXIHKK", Name: "VK_ID_AUTH"},
 }

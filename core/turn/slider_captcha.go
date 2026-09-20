@@ -466,7 +466,7 @@ func (s *captchaNotRobotSession) baseValues() neturl.Values {
 }
 
 func (s *captchaNotRobotSession) request(method string, values neturl.Values) (map[string]interface{}, error) {
-	reqURL := "https://" + s.apiHost + "/method/" + method + "?v=5.131"
+	reqURL := "https://" + s.apiHost + "/method/" + method + "?v=5.276"
 
 	req, err := fhttp.NewRequestWithContext(s.ctx, "POST", reqURL, strings.NewReader(values.Encode()))
 	if err != nil {
@@ -557,8 +557,8 @@ func buildCaptchaDeviceJSON(profile Profile) string {
 	}
 
 	return fmt.Sprintf(
-		`{"screenWidth":%d,"screenHeight":%d,"screenAvailWidth":%d,"screenAvailHeight":%d,"innerWidth":%d,"innerHeight":%d,"devicePixelRatio":%.3f,"language":"%s","languages":%s,"webdriver":false,"hardwareConcurrency":%d,"deviceMemory":%d,"connectionEffectiveType":"4g","notificationsPermission":"default","userAgent":"%s","platform":"%s"}`,
-		w, h, w, availHeight, iw, ih, dpr, primaryLang, string(langsJSON), hwConc, devMem, profile.UserAgent, platform,
+		`{"screenWidth":%d,"screenHeight":%d,"screenAvailWidth":%d,"screenAvailHeight":%d,"innerWidth":%d,"innerHeight":%d,"devicePixelRatio":%v,"language":"%s","languages":%s,"webdriver":false,"hardwareConcurrency":%d,"deviceMemory":%d,"connectionEffectiveType":"4g","notificationsPermission":"default"}`,
+		w, h, w, availHeight, iw, ih, dpr, primaryLang, string(langsJSON), hwConc, devMem,
 	)
 }
 
@@ -582,7 +582,8 @@ func (s *captchaNotRobotSession) requestComponentDone() error {
 }
 
 func (s *captchaNotRobotSession) requestCheckboxCheck() (*captchaCheckResult, error) {
-	return s.requestCheck("[]", base64.StdEncoding.EncodeToString([]byte("{}")))
+	cursor, taps := generateCheckboxTrajectory(time.Now().UnixMilli())
+	return s.requestCheckDetailed(cursor, taps, "")
 }
 
 func (s *captchaNotRobotSession) requestSliderContent(sliderSettings string) (*sliderCaptchaContent, error) {
@@ -608,13 +609,15 @@ func (s *captchaNotRobotSession) requestSliderCheck(activeSteps []int, candidate
 }
 
 func (s *captchaNotRobotSession) requestCheck(cursor string, answer string) (*captchaCheckResult, error) {
+	return s.requestCheckDetailed(cursor, "[]", answer)
+}
+
+func (s *captchaNotRobotSession) requestCheckDetailed(cursor string, taps string, answer string) (*captchaCheckResult, error) {
 	if cursor == "" {
 		cursor = "[]"
 	}
-
-	debugInfo := s.debugInfo
-	if debugInfo == "" {
-		debugInfo = captchaDebugInfo
+	if taps == "" {
+		taps = "[]"
 	}
 
 	values := s.baseValues()
@@ -622,18 +625,21 @@ func (s *captchaNotRobotSession) requestCheck(cursor string, answer string) (*ca
 	values.Set("gyroscope", "[]")
 	values.Set("motion", "[]")
 	values.Set("cursor", cursor)
-	values.Set("taps", "[]")
-	values.Set("connectionRtt", "[]")
-	values.Set("connectionDownlink", "[10,10,10]")
+	values.Set("taps", taps)
 	values.Set("browser_fp", s.browserFp)
 	values.Set("hash", s.hash)
-	values.Set("answer", answer)
-	values.Set("debug_info", debugInfo)
+	if answer != "" {
+		values.Set("answer", answer)
+	}
+	if s.debugInfo != "" {
+		values.Set("debug_info", s.debugInfo)
+	}
 
 	resp, err := s.request("captchaNotRobot.check", values)
 	if err != nil {
 		return nil, fmt.Errorf("check failed: %w", err)
 	}
+	log.Printf("[Auto Captcha] RAW check response: %+v", resp)
 	return parseCaptchaCheckResult(resp)
 }
 
@@ -697,25 +703,10 @@ func (s *captchaNotRobotSession) solveSlider(initialSettings *captchaSettingsRes
 
 	time.Sleep(200 * time.Millisecond)
 
-	log.Printf("[Auto Captcha] Slider: Step 3/4: check (initial checkbox)")
-	initialCheck, err := s.requestCheckboxCheck()
-	if err != nil {
-		return "", err
-	}
-	if initialCheck.Status == "OK" {
-		if initialCheck.SuccessToken == "" {
-			return "", fmt.Errorf("success_token not found in checkbox check")
-		}
-		s.requestEndSession()
-		return initialCheck.SuccessToken, nil
-	}
-
 	sliderSettings, hasSlider := settingsResp.SettingsByType[sliderCaptchaType]
 	log.Printf(
-		"[Auto Captcha] Checkbox check returned status=%s (settings show_type=%q, check show_type=%q, available_types=%s, has_slider=%v)",
-		initialCheck.Status,
+		"[Auto Captcha] Slider solver starting (settings show_type=%q, available_types=%s, has_slider=%v)",
 		settingsResp.ShowCaptchaType,
-		initialCheck.ShowCaptchaType,
 		describeCaptchaTypes(settingsResp.SettingsByType),
 		hasSlider,
 	)
@@ -735,7 +726,7 @@ func (s *captchaNotRobotSession) solveSlider(initialSettings *captchaSettingsRes
 			s.requestEndSession()
 			return finalCheck.SuccessToken, nil
 		}
-		return "", fmt.Errorf("check status: %s (slider getContent failed: %w)", initialCheck.Status, err)
+		return "", fmt.Errorf("slider getContent failed: %w", err)
 	}
 
 	candidates, err := rankSliderCandidates(sliderContent.Image, sliderContent.Size, sliderContent.Steps)
@@ -1154,9 +1145,8 @@ func buildSliderCursor(candidateIndex int, candidateCount int, startTime int64) 
 	}
 
 	type cursorPoint struct {
-		X int   `json:"x"`
-		Y int   `json:"y"`
-		T int64 `json:"t"`
+		X int `json:"x"`
+		Y int `json:"y"`
 	}
 
 	startX := 140
@@ -1170,7 +1160,6 @@ func buildSliderCursor(candidateIndex int, candidateCount int, startTime int64) 
 		points = append(points, cursorPoint{
 			X: x,
 			Y: y,
-			T: startTime + int64(step*18),
 		})
 	}
 
@@ -1179,6 +1168,37 @@ func buildSliderCursor(candidateIndex int, candidateCount int, startTime int64) 
 		return "[]"
 	}
 	return string(data)
+}
+
+func generateCheckboxTrajectory(nowMs int64) (string, string) {
+	type cursorPoint struct {
+		X int `json:"x"`
+		Y int `json:"y"`
+	}
+
+	targetX := 26 + rand.Intn(6)
+	targetY := 26 + rand.Intn(6)
+
+	startX := 180 + rand.Intn(150)
+	startY := 120 + rand.Intn(100)
+
+	numSteps := 15 + rand.Intn(10)
+	points := make([]cursorPoint, 0, numSteps+1)
+
+	for i := 0; i <= numSteps; i++ {
+		t := float64(i) / float64(numSteps)
+		ease := 1.0 - math.Pow(1.0-t, 3)
+		x := int(float64(startX) + float64(targetX-startX)*ease)
+		y := int(float64(startY) + float64(targetY-startY)*ease)
+		if i > 0 && i < numSteps {
+			x += (rand.Intn(3) - 1)
+			y += (rand.Intn(3) - 1)
+		}
+		points = append(points, cursorPoint{X: x, Y: y})
+	}
+
+	cursorBytes, _ := json.Marshal(points)
+	return string(cursorBytes), "[]"
 }
 
 func trySliderCaptchaCandidates(

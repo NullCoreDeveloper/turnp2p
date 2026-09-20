@@ -25,8 +25,15 @@ func isElevated() bool {
 // ensureElevated restarts the current application with Administrator privileges via UAC ("runas")
 // if it was launched without elevation.
 func ensureElevated() bool {
+	// If already elevated or already attempted, proceed normally
 	if isElevated() {
 		return true
+	}
+
+	for _, arg := range os.Args[1:] {
+		if arg == "--elevated" {
+			return true
+		}
 	}
 
 	exe, err := os.Executable()
@@ -46,9 +53,8 @@ func ensureElevated() bool {
 	}
 	cwdPtr, _ := windows.UTF16PtrFromString(cwd)
 
-	var args string
+	var quotedArgs []string
 	if len(os.Args) > 1 {
-		var quotedArgs []string
 		for _, arg := range os.Args[1:] {
 			if strings.Contains(arg, " ") {
 				quotedArgs = append(quotedArgs, fmt.Sprintf(`"%s"`, arg))
@@ -56,19 +62,16 @@ func ensureElevated() bool {
 				quotedArgs = append(quotedArgs, arg)
 			}
 		}
-		args = strings.Join(quotedArgs, " ")
 	}
+	quotedArgs = append(quotedArgs, "--elevated")
+	args := strings.Join(quotedArgs, " ")
 
-	var argPtr *uint16
-	if args != "" {
-		argPtr, _ = windows.UTF16PtrFromString(args)
-	}
+	argPtr, _ := windows.UTF16PtrFromString(args)
 
 	err = windows.ShellExecute(0, verbPtr, exePtr, argPtr, cwdPtr, windows.SW_SHOWNORMAL)
 	if err != nil {
-		// User declined UAC prompt or ShellExecute failed
-		os.Exit(1)
-		return false
+		// If UAC was rejected or failed, continue in unprivileged (userspace) mode
+		return true
 	}
 
 	// Elevated process launched successfully, terminate current unprivileged instance

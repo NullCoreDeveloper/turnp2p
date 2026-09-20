@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	neturl "net/url"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -167,6 +168,16 @@ func rewriteProxyRequest(req *http.Request, targetURL *neturl.URL) {
 	}
 	req.Host = targetURL.Host
 
+	// If request is calling VK API method (/method/...), route to api.vk.ru (or api.vk.com)
+	if strings.HasPrefix(req.URL.Path, "/method/") {
+		apiHost := "api.vk.ru"
+		if strings.HasSuffix(targetURL.Host, ".com") {
+			apiHost = "api.vk.com"
+		}
+		req.URL.Host = apiHost
+		req.Host = apiHost
+	}
+
 	req.Header.Del("Accept-Encoding")
 	req.Header.Del("TE")
 	for _, headerName := range []string{"Origin", "Referer"} {
@@ -218,45 +229,34 @@ func rewriteCaptchaHTML(html string, targetURL *neturl.URL) string {
     var localOrigin = %q;
     var upstreamOrigin = %q;
 
+    // Mask webdriver flag
+    try {
+        Object.defineProperty(navigator, 'webdriver', {
+            get: function() { return false; }
+        });
+    } catch (e) {}
+
     function rewriteUrl(urlStr) {
         if (!urlStr || typeof urlStr !== 'string') return urlStr;
         if (urlStr.indexOf(localOrigin) === 0) return urlStr;
         if (urlStr.indexOf(upstreamOrigin) === 0) return localOrigin + urlStr.slice(upstreamOrigin.length);
-        if (urlStr.indexOf('//') === 0) {
-            return '/generic_proxy?proxy_url=' + encodeURIComponent(window.location.protocol + urlStr);
-        }
-        if (urlStr.indexOf('http://') === 0 || urlStr.indexOf('https://') === 0) {
-            return '/generic_proxy?proxy_url=' + encodeURIComponent(urlStr);
-        }
+        if (urlStr.indexOf('https://api.vk.ru') === 0) return localOrigin + urlStr.slice(17);
+        if (urlStr.indexOf('https://api.vk.com') === 0) return localOrigin + urlStr.slice(18);
         return urlStr;
     }
 
-    function rewriteElementAttr(el, attr) {
-        if (!el || !el.getAttribute) return;
-        var value = el.getAttribute(attr);
-        if (!value) return;
-        var rewritten = rewriteUrl(value);
-        if (rewritten !== value) {
-            el.setAttribute(attr, rewritten);
-        }
-    }
-
-    function rewriteDocument(root) {
-        if (!root || !root.querySelectorAll) return;
-        root.querySelectorAll('[href]').forEach(function(el) { rewriteElementAttr(el, 'href'); });
-        root.querySelectorAll('[src]').forEach(function(el) { rewriteElementAttr(el, 'src'); });
-        root.querySelectorAll('form[action]').forEach(function(el) { rewriteElementAttr(el, 'action'); });
-    }
+    var autoClickInterval = null;
 
     function handleSuccessToken(token) {
         if (!token) return;
+        if (autoClickInterval) clearInterval(autoClickInterval);
         fetch('/local-captcha-result', {
             method: 'POST',
             headers: {'Content-Type': 'application/x-www-form-urlencoded'},
             body: 'token=' + encodeURIComponent(token)
         }).then(function() {
-            document.body.innerHTML = '<h2 style="text-align:center;margin-top:20vh;color:#22c55e">Капча успешно пройдена!</h2><p style="text-align:center;color:#64748b">Окно можно закрыть, приложение подключается...</p>';
-            setTimeout(function() { window.close(); }, 500);
+            document.body.innerHTML = '<h2 style="text-align:center;margin-top:20vh;color:#22c55e">Капча успешно пройдена!</h2>';
+            setTimeout(function() { window.close(); }, 300);
         }).catch(function() {});
     }
 
@@ -312,58 +312,47 @@ func rewriteCaptchaHTML(html string, targetURL *neturl.URL) string {
         };
     }
 
-    document.addEventListener('submit', function(event) {
-        if (event.target && event.target.action) {
-            event.target.action = rewriteUrl(event.target.action);
-        }
-    }, true);
+    // Auto-clicker: clicks the "I am not a robot" checkbox once page finishes initial render
+    function tryAutoClick() {
+        var el = document.querySelector('input[type="checkbox"]') ||
+                 document.querySelector('.Checkbox__input') ||
+                 document.querySelector('[role="checkbox"]') ||
+                 document.querySelector('.vkuiCheckbox') ||
+                 document.querySelector('div[class*="Checkbox"]') ||
+                 document.querySelector('svg[class*="Checkbox"]') ||
+                 document.querySelector('[class*="notRobotCheckbox"]');
+        if (el) {
+            var target = el.closest('label') || el;
+            var rect = target.getBoundingClientRect();
+            var cx = rect.left + rect.width / 2;
+            var cy = rect.top + rect.height / 2;
 
-    document.addEventListener('click', function(event) {
-        var target = event.target && event.target.closest ? event.target.closest('a[href]') : null;
-        if (target && target.href) {
-            target.href = rewriteUrl(target.href);
+            target.dispatchEvent(new PointerEvent('pointermove', {bubbles: true, cancelable: true, clientX: cx, clientY: cy}));
+            target.dispatchEvent(new MouseEvent('mousemove', {bubbles: true, cancelable: true, clientX: cx, clientY: cy}));
+            target.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, cancelable: true, clientX: cx, clientY: cy}));
+            target.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true, clientX: cx, clientY: cy}));
+            setTimeout(function() {
+                target.dispatchEvent(new PointerEvent('pointerup', {bubbles: true, cancelable: true, clientX: cx, clientY: cy}));
+                target.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true, clientX: cx, clientY: cy}));
+                target.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, clientX: cx, clientY: cy}));
+                if (target.click) target.click();
+            }, 60);
+            return true;
         }
-    }, true);
+        return false;
+    }
 
-    var origFormSubmit = HTMLFormElement.prototype.submit;
-    HTMLFormElement.prototype.submit = function() {
-        if (this.action) {
-            this.action = rewriteUrl(this.action);
-        }
-        return origFormSubmit.apply(this, arguments);
-    };
-
-    var origWindowOpen = window.open;
-    if (origWindowOpen) {
-        window.open = function(url) {
-            if (typeof url === 'string') {
-                arguments[0] = rewriteUrl(url);
+    // Continuously check and trigger checkbox click until success_token is caught
+    setTimeout(function() {
+        var attempts = 0;
+        autoClickInterval = setInterval(function() {
+            attempts++;
+            tryAutoClick();
+            if (attempts > 30) {
+                clearInterval(autoClickInterval);
             }
-            return origWindowOpen.apply(this, arguments);
-        };
-    }
-
-    rewriteDocument(document);
-    if (document.documentElement && window.MutationObserver) {
-        new MutationObserver(function(mutations) {
-            mutations.forEach(function(mutation) {
-                if (mutation.type === 'attributes' && mutation.target) {
-                    rewriteElementAttr(mutation.target, mutation.attributeName);
-                    return;
-                }
-                mutation.addedNodes.forEach(function(node) {
-                    if (node.nodeType === 1) {
-                        rewriteDocument(node);
-                    }
-                });
-            });
-        }).observe(document.documentElement, {
-            subtree: true,
-            childList: true,
-            attributes: true,
-            attributeFilter: ['href', 'src', 'action']
-        });
-    }
+        }, 400);
+    }, 400);
 })();
 </script>
 `, localOrigin, upstreamOrigin)
@@ -438,6 +427,8 @@ func SolveCaptchaViaBrowser(ctx context.Context, redirectURI string) (string, er
 		},
 		ModifyResponse: func(res *http.Response) error {
 			rewriteProxyCookies(res.Header)
+			res.Header.Set("Access-Control-Allow-Origin", "*")
+			res.Header.Set("Access-Control-Allow-Credentials", "true")
 
 			if res.StatusCode >= 300 && res.StatusCode < 400 {
 				if loc := res.Header.Get("Location"); loc != "" {
@@ -484,12 +475,16 @@ func SolveCaptchaViaBrowser(ctx context.Context, redirectURI string) (string, er
 			}
 
 			if strings.Contains(res.Request.URL.Path, "captchaNotRobot.check") {
+				log.Printf("[Captcha Proxy] RAW check response: %s", string(bodyBytes))
 				token := extractSuccessToken(bodyBytes)
 				if token != "" {
+					log.Printf("[Captcha Proxy] Extracted success_token: %s", token)
 					select {
 					case keyCh <- token:
 					default:
 					}
+				} else {
+					log.Printf("[Captcha Proxy] Warning: no success_token found in check response")
 				}
 			}
 
@@ -554,6 +549,13 @@ func SolveCaptchaViaBrowser(ctx context.Context, redirectURI string) (string, er
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[Captcha Proxy] HTTP %s %s", r.Method, r.URL.String())
+		if r.Method == http.MethodOptions {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
+			w.Header().Set("Access-Control-Allow-Headers", "*")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		if r.URL.Path == "/" && targetURL.Path != "" && targetURL.Path != "/" && r.URL.RawQuery == "" {
 			log.Printf("[Captcha Proxy] Redirecting ROOT to: %s", localCaptchaURLForTarget(targetURL))
 			http.Redirect(w, r, localCaptchaURLForTarget(targetURL), http.StatusTemporaryRedirect)
@@ -586,11 +588,51 @@ func SolveCaptchaViaBrowser(ctx context.Context, redirectURI string) (string, er
 }
 
 func openBrowser(url string) {
+	if openHeadlessBrowser(url) {
+		return
+	}
 	for _, cmd := range browserOpenCommands(runtime.GOOS, url) {
 		if err := exec.Command(cmd.name, cmd.args...).Start(); err == nil {
 			return
 		}
 	}
+}
+
+func openHeadlessBrowser(url string) bool {
+	userDataDir, err := os.MkdirTemp("", "turnp2p-chrome-*")
+	if err != nil {
+		userDataDir = "/tmp/turnp2p-chrome-tmp"
+	}
+
+	commonFlags := []string{
+		"--headless=new",
+		"--disable-gpu",
+		"--no-sandbox",
+		"--disable-blink-features=AutomationControlled",
+		"--disable-web-security",
+		"--allow-running-insecure-content",
+		"--window-size=1280,800",
+		"--user-data-dir=" + userDataDir,
+	}
+
+	candidates := getBrowserCandidates()
+
+	for _, bin := range candidates {
+		args := append([]string{}, commonFlags...)
+		args = append(args, url)
+		cmd := exec.Command(bin, args...)
+		setSysProcAttr(cmd)
+		if err := cmd.Start(); err == nil {
+			log.Printf("[VK Captcha] Запущен фоновый headless браузер: %s", bin)
+			go func(p *os.Process, dir string) {
+				time.Sleep(20 * time.Second)
+				_ = p.Kill()
+				_ = os.RemoveAll(dir)
+			}(cmd.Process, userDataDir)
+			return true
+		}
+	}
+	return false
 }
 
 func browserOpenCommands(goos string, url string) []browserCommand {

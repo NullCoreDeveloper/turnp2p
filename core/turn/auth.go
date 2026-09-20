@@ -166,6 +166,7 @@ func FetchVKTurnCredentials(ctx context.Context, link string) (*Credentials, err
 				lastErr = err
 				break
 			}
+			log.Printf("[VK Auth] getAnonymousToken attempt %d response: %+v", attempt, resp2)
 
 			if errObj, hasErr := resp2["error"].(map[string]interface{}); hasErr {
 				captchaChallenge := ParseCaptchaError(errObj)
@@ -173,37 +174,40 @@ func FetchVKTurnCredentials(ctx context.Context, link string) (*Credentials, err
 					var solvedToken string
 					var solveErr error
 
-					// 1. Try automatic background solver first
-					if captchaChallenge.SessionToken != "" {
-						log.Printf("[VK Auth] Попытка автоматического фонового решения капчи...")
+					// 1. Run headless browser solver FIRST on the fresh redirectURI!
+					log.Printf("[VK Auth] Запуск автономного фонового решателя капчи...")
+					solvedToken, solveErr = SolveCaptchaViaBrowser(ctx, captchaChallenge.RedirectURI)
+
+					// 2. If headless solver failed or unavailable, try API solver fallback
+					if (solveErr != nil || solvedToken == "") && captchaChallenge.SessionToken != "" {
+						log.Printf("[VK Auth] Фоновый браузер не решил капчу (%v). Пробуем API-решатель...", solveErr)
 						solvedToken, solveErr = AutoSolveVkCaptcha(ctx, captchaChallenge.RedirectURI, captchaChallenge.SessionToken, client, prof)
 					}
 
-					// 2. If auto-solver failed, check if token was burned
 					if solveErr != nil || solvedToken == "" {
-						errStr := ""
-						if solveErr != nil {
-							errStr = solveErr.Error()
-						}
-						// If server flagged session as BOT or reached limit, the session token is dead
-						if strings.Contains(errStr, "BOT") || strings.Contains(errStr, "ERROR_LIMIT") {
-							log.Printf("[VK Auth] Сервер VK отклонил капчу (%s). Сессия сожжена, ротируем приложение...", errStr)
-							lastErr = solveErr
-							break
-						}
-
-						log.Printf("[VK Auth] Авто-решение не удалось (%v). Запуск браузера для подтверждения...", solveErr)
-						solvedToken, solveErr = SolveCaptchaViaBrowser(ctx, captchaChallenge.RedirectURI)
-					}
-
-					if solveErr != nil {
-						lastErr = fmt.Errorf("не удалось решить капчу: %w", solveErr)
+						log.Printf("[VK Auth] Авто-решение не удалось для %s (%v). Переходим к следующему приложению...", creds.Name, solveErr)
+						lastErr = solveErr
 						break
 					}
 
-					// Retry with success_token and captcha_attempt
-					data = fmt.Sprintf("vk_join_link=%s&name=%s&captcha_key=&captcha_sid=%s&is_sound_captcha=0&success_token=%s&captcha_ts=%s&captcha_attempt=%s&access_token=%s",
-						fullJoinLink, escapedName, captchaChallenge.CaptchaSid, neturl.QueryEscape(solvedToken), captchaChallenge.CaptchaTs, captchaChallenge.CaptchaAttempt, token1)
+					// Retry with success_token and captcha parameters
+					retryVals := neturl.Values{}
+					retryVals.Set("vk_join_link", fullJoinLink)
+					retryVals.Set("name", name)
+					retryVals.Set("access_token", token1)
+					retryVals.Set("success_token", solvedToken)
+					if captchaChallenge.CaptchaSid != "" {
+						retryVals.Set("captcha_sid", captchaChallenge.CaptchaSid)
+						retryVals.Set("captcha_key", "")
+					}
+					if captchaChallenge.CaptchaTs != "" {
+						retryVals.Set("captcha_ts", captchaChallenge.CaptchaTs)
+					}
+					if captchaChallenge.CaptchaAttempt != "" {
+						retryVals.Set("captcha_attempt", captchaChallenge.CaptchaAttempt)
+					}
+					data = retryVals.Encode()
+					log.Printf("[VK Auth] Retrying getAnonymousToken with success_token...")
 					continue
 				}
 

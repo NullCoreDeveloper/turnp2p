@@ -150,7 +150,7 @@ var MobileProfiles = []Profile{
 
 // GetProfileForApp returns an authentic, fully matched browser profile tailored to the VK app type.
 func GetProfileForApp(appName string) Profile {
-	if appName == "VK_MVK_APP" {
+	if appName == "VK_MVK_APP" || appName == "VK_MVK_VKVIDEO" {
 		return MobileProfiles[rand.Intn(len(MobileProfiles))]
 	}
 	return DesktopProfiles[rand.Intn(len(DesktopProfiles))]
