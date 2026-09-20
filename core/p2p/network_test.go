@@ -338,3 +338,41 @@ func TestP2PFirewallModes(t *testing.T) {
 	}
 	stream.Close()
 }
+
+func TestP2PRawIPFirewall(t *testing.T) {
+	node := NewMeshNode("Tester", "tester.vkturn", "10.42.0.1")
+
+	// Build a mock IPv4 UDP packet targeting port 8080
+	// 20 bytes IPv4 header + 8 bytes UDP header
+	pkt := make([]byte, 28)
+	pkt[0] = 0x45
+	pkt[9] = 17 // UDP
+	// Dest port 8080 (0x1F90)
+	pkt[22] = 0x1F
+	pkt[23] = 0x90
+
+	// 1. Default whitelist: port 8080 not allowed
+	node.SetFirewallMode(FirewallModeWhitelist)
+	if node.isRawIPAllowed(pkt) {
+		t.Errorf("expected port 8080 to be blocked under whitelist")
+	}
+
+	// 2. Allow port 8080
+	node.AllowPort(8080)
+	if !node.isRawIPAllowed(pkt) {
+		t.Errorf("expected port 8080 to be allowed after AllowPort")
+	}
+
+	// 3. Block all
+	node.SetFirewallMode(FirewallModeBlockAll)
+	if node.isRawIPAllowed(pkt) {
+		t.Errorf("expected port 8080 to be blocked under block_all")
+	}
+
+	// 4. Allow all
+	node.SetFirewallMode(FirewallModeAllowAll)
+	if !node.isRawIPAllowed(pkt) {
+		t.Errorf("expected port 8080 to be allowed under allow_all")
+	}
+}
+

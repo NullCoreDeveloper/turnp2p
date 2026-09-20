@@ -383,6 +383,9 @@ func (n *MeshNode) readLoop() {
 		case FrameClose:
 			n.handleClose(payload)
 		case FrameRawIP:
+			if !n.isRawIPAllowed(payload) {
+				continue
+			}
 			n.mu.RLock()
 			cb := n.onRawIP
 			n.mu.RUnlock()
@@ -638,6 +641,81 @@ func (n *MeshNode) Dial(ctx context.Context, targetAddress string, targetPort in
 		stream.Close()
 		return nil, ErrConnTimeout
 	}
+}
+
+// isRawIPAllowed inspects an incoming L3 IPv4 packet against the L4 firewall policy.
+func (n *MeshNode) isRawIPAllowed(ipPacket []byte) bool {
+	if len(ipPacket) < 20 {
+		return true
+	}
+	// Verify IPv4
+	if ipPacket[0]>>4 != 4 {
+		return true
+	}
+
+	n.mu.RLock()
+	mode := n.firewall.Mode
+	allowedPorts := n.firewall.AllowedPorts
+	n.mu.RUnlock()
+
+	if mode == FirewallModeAllowAll {
+		return true
+	}
+
+	proto := ipPacket[9]
+	ihl := int(ipPacket[0]&0x0F) * 4
+	if len(ipPacket) < ihl+4 {
+		return true
+	}
+
+	// Always allow ICMP (ping / traceroute) unless block_all
+	if proto == 1 {
+		return mode != FirewallModeBlockAll
+	}
+
+	// For TCP (6) and UDP (17) packets, check target port against firewall
+	if proto == 6 || proto == 17 {
+		dstPort := int(binary.BigEndian.Uint16(ipPacket[ihl+2 : ihl+4]))
+
+		if mode == FirewallModeBlockAll {
+			// In block_all mode, reject all inbound TCP SYN and inbound UDP
+			if proto == 6 && len(ipPacket) >= ihl+14 {
+				tcpFlags := ipPacket[ihl+13]
+				isSyn := (tcpFlags & 0x02) != 0
+				isAck := (tcpFlags & 0x10) != 0
+				if isSyn && !isAck {
+					log.Printf("[Firewall TUN] Blocked inbound TCP connection to port %d (Policy: block_all)", dstPort)
+					return false
+				}
+			} else if proto == 17 {
+				log.Printf("[Firewall TUN] Blocked inbound UDP packet to port %d (Policy: block_all)", dstPort)
+				return false
+			}
+			return true
+		}
+
+		if mode == FirewallModeWhitelist {
+			// In whitelist mode, verify if dstPort is explicitly allowed
+			if !allowedPorts[dstPort] {
+				// Block new inbound TCP connections (SYN without ACK)
+				if proto == 6 && len(ipPacket) >= ihl+14 {
+					tcpFlags := ipPacket[ihl+13]
+					isSyn := (tcpFlags & 0x02) != 0
+					isAck := (tcpFlags & 0x10) != 0
+					if isSyn && !isAck {
+						log.Printf("[Firewall TUN] Rejected inbound TCP connection to port %d (Not in whitelist)", dstPort)
+						return false
+					}
+				} else if proto == 17 {
+					// Drop inbound UDP to unshared port
+					log.Printf("[Firewall TUN] Rejected inbound UDP packet to port %d (Not in whitelist)", dstPort)
+					return false
+				}
+			}
+		}
+	}
+
+	return true
 }
 
 func (n *MeshNode) handleConnect(payload []byte, addr net.Addr) {

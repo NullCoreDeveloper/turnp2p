@@ -60,6 +60,8 @@ type App struct {
 	statusListeners     []func(ConnectionStatus)
 	visibilityListeners []func(bool)
 	windowVisible       bool
+	savedAllowedPorts   map[int]bool
+	savedFirewallMode   string
 	lastParams          lastJoinParams
 	mu                  sync.RWMutex
 }
@@ -67,10 +69,12 @@ type App struct {
 // NewApp creates a new App application struct.
 func NewApp() *App {
 	return &App{
-		proxyMgr:      proxy.NewManager(nil),
-		hostsMgr:      hosts.NewManager(""),
-		networkMode:   "tun",
-		windowVisible: true,
+		proxyMgr:          proxy.NewManager(nil),
+		hostsMgr:          hosts.NewManager(""),
+		networkMode:       "tun",
+		windowVisible:     true,
+		savedFirewallMode: p2p.FirewallModeWhitelist,
+		savedAllowedPorts: make(map[int]bool),
 		status: ConnectionStatus{
 			Connected:    false,
 			StatusText:   "Disconnected",
@@ -262,6 +266,12 @@ func (a *App) JoinNetwork(vkLink string, nickname string, customDomain string, o
 
 	// 3. Initialize and start P2P MeshNode with custom domain support
 	node := p2p.NewMeshNode(nickname, customDomain, "")
+	if a.savedFirewallMode != "" {
+		node.SetFirewallMode(a.savedFirewallMode)
+	}
+	for p := range a.savedAllowedPorts {
+		node.AllowPort(p)
+	}
 
 	node.SetPeerCallback(func(peers []p2p.Peer) {
 		// Sync peer domains to OS hosts file with real virtual IPs (10.42.X.Y)
@@ -462,11 +472,12 @@ func (a *App) LeaveNetwork() error {
 	return nil
 }
 
-// SetFirewallMode updates the inbound firewall policy (whitelist, block_all, allow_all).
+// SetFirewallMode updates inbound firewall policy.
 func (a *App) SetFirewallMode(mode string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	a.savedFirewallMode = mode
 	if a.meshNode != nil {
 		a.meshNode.SetFirewallMode(mode)
 	}
@@ -481,15 +492,22 @@ func (a *App) AllowInboundPort(port int) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	if a.savedAllowedPorts == nil {
+		a.savedAllowedPorts = make(map[int]bool)
+	}
+	a.savedAllowedPorts[port] = true
+
 	if a.meshNode != nil {
 		a.meshNode.AllowPort(port)
-		_, ports := a.meshNode.GetFirewallConfig()
-		a.status.SharedPorts = ports
 	}
 
-	if a.ctx != nil {
-		wailsRuntime.EventsEmit(a.ctx, "status_change", a.status)
+	ports := make([]int, 0, len(a.savedAllowedPorts))
+	for p := range a.savedAllowedPorts {
+		ports = append(ports, p)
 	}
+	a.status.SharedPorts = ports
+
+	a.emitStatusChangeLocked()
 	return nil
 }
 
@@ -498,15 +516,21 @@ func (a *App) DisallowInboundPort(port int) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	if a.meshNode != nil {
-		a.meshNode.DisallowPort(port)
-		_, ports := a.meshNode.GetFirewallConfig()
-		a.status.SharedPorts = ports
+	if a.savedAllowedPorts != nil {
+		delete(a.savedAllowedPorts, port)
 	}
 
-	if a.ctx != nil {
-		wailsRuntime.EventsEmit(a.ctx, "status_change", a.status)
+	if a.meshNode != nil {
+		a.meshNode.DisallowPort(port)
 	}
+
+	ports := make([]int, 0, len(a.savedAllowedPorts))
+	for p := range a.savedAllowedPorts {
+		ports = append(ports, p)
+	}
+	a.status.SharedPorts = ports
+
+	a.emitStatusChangeLocked()
 	return nil
 }
 

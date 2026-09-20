@@ -163,7 +163,7 @@ export function App() {
             obfKey: status.obfKey || obfKey,
           });
           if (status.firewallMode) setFirewallMode(status.firewallMode);
-          if (status.sharedPorts) setAllowedPorts(status.sharedPorts);
+          if (status.sharedPorts && status.sharedPorts.length > 0) setAllowedPorts(status.sharedPorts);
         }
       });
 

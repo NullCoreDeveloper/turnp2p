@@ -121,6 +121,8 @@ func TestTUNRouterBidirectionalFlow(t *testing.T) {
 
 	nodeA := p2p.NewMeshNode("NodeA", "nodea.vkturn", "10.42.0.1")
 	nodeB := p2p.NewMeshNode("NodeB", "nodeb.vkturn", "10.42.0.2")
+	nodeA.SetFirewallMode(p2p.FirewallModeAllowAll)
+	nodeB.SetFirewallMode(p2p.FirewallModeAllowAll)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
