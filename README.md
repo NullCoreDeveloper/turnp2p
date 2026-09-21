@@ -2,7 +2,6 @@
 
 [![Views](https://komarev.com/ghpvc/?username=NullCoreDeveloper-TurnP2P&label=Views&color=007ec6&style=flat-square)](https://github.com/NullCoreDeveloper/TurnP2P)
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPLv3-blue.svg?style=flat-square)](LICENSE)
-[![GitHub Release](https://img.shields.io/github/v/release/NullCoreDeveloper/TurnP2P?style=flat-square)](https://github.com/NullCoreDeveloper/TurnP2P/releases)
 
 Опенсорсная утилита для создания виртуальных локальных сетей (L3 VPN / P2P-оверлей) между компьютерами за NAT (аналог Hamachi, Radmin VPN или ZeroTier).
 
